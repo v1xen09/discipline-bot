@@ -27,10 +27,10 @@ from database import Database
 
 # Пресеты напоминаний: label → значение notify_reminders (или None = выкл)
 _REMINDER_PRESETS = [
-    ("Выкл", None),
-    ("1×12:00", "12:00"),
-    ("2×12+17", "12:00,17:00"),
-    ("3×10+14+18", "10:00,14:00,18:00"),
+    ("Выключено", None),
+    ("Раз в день — 12:00", "12:00"),
+    ("Два раза — 12:00 и 17:00", "12:00,17:00"),
+    ("Три раза — 10:00, 14:00 и 18:00", "10:00,14:00,18:00"),
 ]
 
 # Сетка выбора часа
@@ -53,7 +53,9 @@ def _settings_keyboard(current: str) -> InlineKeyboardMarkup:
         rows.append(persona_row)
 
     rows.append([InlineKeyboardButton("🔔 Уведомления", callback_data="settings:notif_open")])
+    rows.append([InlineKeyboardButton("🌍 Город (погода)", callback_data="settings:set_city")])
     rows.append([InlineKeyboardButton("🧹 Очистить мою историю", callback_data="settings:wipe")])
+    rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -70,46 +72,50 @@ async def _render_settings(db: Database, telegram_id: int) -> tuple[str, InlineK
     return text, _settings_keyboard(current)
 
 
+def _fix_time(t: str | None) -> str | None:
+    """Нормализует старые значения вида '07' → '07:00'."""
+    if t and ":" not in t:
+        return t.zfill(2) + ":00"
+    return t
+
+
 def _notif_keyboard(settings: dict) -> InlineKeyboardMarkup:
+    morning = _fix_time(settings["morning"]) or "выкл"
+    evening = _fix_time(settings["evening"]) or "выкл"
+    rem = settings["reminders"]
+    rem_label = ", ".join(rem.split(",")) if rem else "выкл"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🌅 Утро: {morning}  ✏️", callback_data="settings:notif_pick_morning")],
+        [InlineKeyboardButton(f"🌙 Вечер: {evening}  ✏️", callback_data="settings:notif_pick_evening")],
+        [InlineKeyboardButton(f"🔔 Напоминания: {rem_label}  ✏️", callback_data="settings:notif_reminders_open")],
+        [InlineKeyboardButton("← Назад", callback_data="settings:open")],
+    ])
+
+
+def _reminders_keyboard(current: str | None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-
-    morning = settings["morning"] or "выкл"
-    rows.append([
-        InlineKeyboardButton(f"🌅 Утро: {morning}", callback_data="settings:notif_pick_morning"),
-        InlineKeyboardButton("Выкл" if settings["morning"] else "●Выкл", callback_data="settings:notif_morning:off"),
-    ])
-
-    evening = settings["evening"] or "выкл"
-    rows.append([
-        InlineKeyboardButton(f"🌙 Вечер: {evening}", callback_data="settings:notif_pick_evening"),
-        InlineKeyboardButton("Выкл" if settings["evening"] else "●Выкл", callback_data="settings:notif_evening:off"),
-    ])
-
-    cur_reminders = settings["reminders"]
-    rows.append([InlineKeyboardButton("🔔 Авто-напоминания:", callback_data="settings:noop")])
-    preset_row: list[InlineKeyboardButton] = []
     for label, value in _REMINDER_PRESETS:
-        marker = "●" if cur_reminders == value else ""
-        preset_row.append(InlineKeyboardButton(
-            f"{marker}{label}" if marker else label,
+        marker = "● " if current == value else ""
+        rows.append([InlineKeyboardButton(
+            f"{marker}{label}",
             callback_data=f"settings:notif_reminders:{value or 'off'}",
-        ))
-    rows.append(preset_row)
-
-    rows.append([InlineKeyboardButton("← Назад", callback_data="settings:open")])
+        )])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="settings:notif_open")])
     return InlineKeyboardMarkup(rows)
 
 
-def _time_picker_keyboard(which: str, presets: list[str]) -> InlineKeyboardMarkup:
+def _time_picker_keyboard(which: str, presets: list[str], current: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for t in presets:
-        row.append(InlineKeyboardButton(t, callback_data=f"settings:notif_{which}:{t}"))
+        marker = "● " if t == current else ""
+        row.append(InlineKeyboardButton(f"{marker}{t}", callback_data=f"settings:notif_{which}:{t}"))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("🚫 Выключить", callback_data=f"settings:notif_{which}:off")])
     rows.append([InlineKeyboardButton("← Назад", callback_data="settings:notif_open")])
     return InlineKeyboardMarkup(rows)
 
@@ -131,6 +137,11 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
     action = parts[1]
+
+    # Сбрасываем флаги ожидания ввода, если пользователь ушёл из раздела
+    if action != "set_city":
+        ctx.user_data.pop("awaiting_city", None)
+    ctx.user_data.pop("awaiting_note", None)
 
     if action == "open":
         text, keyboard = await _render_settings(db, user.id)
@@ -167,56 +178,94 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         return
 
     if action == "notif_pick_morning":
-        kb = _time_picker_keyboard("morning", _TIME_PRESETS_MORNING)
+        settings = await db.get_notification_settings(user.id)
+        kb = _time_picker_keyboard("morning", _TIME_PRESETS_MORNING, current=_fix_time(settings["morning"]))
         await query.edit_message_text(
-            "🌅 <b>Утреннее сообщение</b>\nВыбери время:", parse_mode="HTML", reply_markup=kb
+            "🌅 <b>Утреннее сообщение</b>\n\n"
+            "Бот пришлёт сводку задач и мотивацию в выбранное время.",
+            parse_mode="HTML", reply_markup=kb,
         )
         return
 
     if action == "notif_pick_evening":
-        kb = _time_picker_keyboard("evening", _TIME_PRESETS_EVENING)
+        settings = await db.get_notification_settings(user.id)
+        kb = _time_picker_keyboard("evening", _TIME_PRESETS_EVENING, current=_fix_time(settings["evening"]))
         await query.edit_message_text(
-            "🌙 <b>Вечернее сообщение</b>\nВыбери время:", parse_mode="HTML", reply_markup=kb
+            "🌙 <b>Вечернее сообщение</b>\n\n"
+            "Бот подведёт итоги дня в выбранное время.",
+            parse_mode="HTML", reply_markup=kb,
         )
         return
 
     if action == "notif_morning" and len(parts) >= 3:
-        new_val = None if parts[2] == "off" else parts[2]
+        # parts[2:] — "07", "00" → собираем обратно в "07:00"
+        raw = ":".join(parts[2:])
+        new_val = None if raw == "off" else raw
         settings = await db.get_notification_settings(user.id)
         await db.set_notification_settings(user.id, new_val, settings["evening"], settings["reminders"])
         settings["morning"] = new_val
-        label = new_val or "выкл"
-        await query.edit_message_text(
-            f"🔔 <b>Уведомления</b>\n\n🌅 Утреннее: <b>{label}</b>",
-            parse_mode="HTML",
-            reply_markup=_notif_keyboard(settings),
+        text = (
+            "🔔 <b>Уведомления</b>\n\n"
+            f"✅ Утреннее время: <b>{new_val or 'выключено'}</b>"
         )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
         return
 
     if action == "notif_evening" and len(parts) >= 3:
-        new_val = None if parts[2] == "off" else parts[2]
+        raw = ":".join(parts[2:])
+        new_val = None if raw == "off" else raw
         settings = await db.get_notification_settings(user.id)
         await db.set_notification_settings(user.id, settings["morning"], new_val, settings["reminders"])
         settings["evening"] = new_val
-        label = new_val or "выкл"
+        text = (
+            "🔔 <b>Уведомления</b>\n\n"
+            f"✅ Вечернее время: <b>{new_val or 'выключено'}</b>"
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
+        return
+
+    if action == "notif_reminders_open":
+        settings = await db.get_notification_settings(user.id)
         await query.edit_message_text(
-            f"🔔 <b>Уведомления</b>\n\n🌙 Вечернее: <b>{label}</b>",
+            "🔔 <b>Напоминания о задачах</b>\n\n"
+            "Бот будет напоминать о невыполненных задачах в выбранное время.\n"
+            "Выбери подходящий вариант:",
             parse_mode="HTML",
-            reply_markup=_notif_keyboard(settings),
+            reply_markup=_reminders_keyboard(settings["reminders"]),
         )
         return
 
     if action == "notif_reminders" and len(parts) >= 3:
-        new_val = None if parts[2] == "off" else parts[2]
+        raw = ":".join(parts[2:])
+        new_val = None if raw == "off" else raw
         settings = await db.get_notification_settings(user.id)
         await db.set_notification_settings(user.id, settings["morning"], settings["evening"], new_val)
         settings["reminders"] = new_val
-        label = new_val or "выкл"
         await query.edit_message_text(
-            f"🔔 <b>Уведомления</b>\n\n🔔 Напоминания: <b>{label}</b>",
+            "🔔 <b>Напоминания о задачах</b>\n\n"
+            f"✅ Сохранено: <b>{new_val or 'выключено'}</b>",
             parse_mode="HTML",
-            reply_markup=_notif_keyboard(settings),
+            reply_markup=_reminders_keyboard(new_val),
         )
+        return
+
+    # ── Город / погода ───────────────────────────────────────────────────────
+
+    if action == "set_city":
+        db2: Database = ctx.bot_data["db"]
+        loc = await db2.get_location(user.id)
+        current_city = loc.get("city") or "не задан"
+        await query.edit_message_text(
+            f"🌍 <b>Город для прогноза погоды</b>\n\n"
+            f"Сейчас: <b>{current_city}</b>\n\n"
+            "Напиши название города (<i>например, Москва</i>) "
+            "или отправь геолокацию 📍 прямо в чат.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("← Назад", callback_data="settings:open")]
+            ]),
+        )
+        ctx.user_data["awaiting_city"] = True
         return
 
     # ── Wipe ─────────────────────────────────────────────────────────────────

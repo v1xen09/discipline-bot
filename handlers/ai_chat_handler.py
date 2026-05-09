@@ -30,6 +30,37 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     ai: AIClient = ctx.bot_data["ai"]
     user = update.effective_user
 
+    # Ожидаем ввод города после нажатия «🌍 Город» в настройках
+    if ctx.user_data.get("awaiting_city"):
+        ctx.user_data.pop("awaiting_city")
+        from weather_client import WeatherClient
+        weather: WeatherClient = ctx.bot_data.get("weather")
+        city_name = (update.message.text or "").strip()
+        if weather and city_name:
+            coords = await weather.geocode(city_name)
+            if coords:
+                await db.set_location(user.id, city=city_name, lat=coords[0], lon=coords[1])
+                await update.message.reply_text(f"✅ Город сохранён: {city_name}")
+            else:
+                await update.message.reply_text(
+                    f"❌ Не нашёл город «{city_name}». Попробуй другое написание."
+                )
+        else:
+            await update.message.reply_text("Укажи название города текстом.")
+        return
+
+    # Ожидаем текст новой заметки после нажатия «➕ Новая заметка»
+    if ctx.user_data.get("awaiting_note"):
+        ctx.user_data.pop("awaiting_note")
+        db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
+        text_note = (update.message.text or "").strip()
+        if text_note:
+            await db.add_note(db_user["id"], text_note, source="user")
+            await update.message.reply_html(f"📝 Сохранено\n\n<i>{text_note}</i>")
+        else:
+            await update.message.reply_text("Текст заметки пустой — ничего не сохранил.")
+        return
+
     db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
     context = await db.get_user_summary_context(user.id)
     personality = await db.get_personality(user.id)
@@ -113,7 +144,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
     elif intent == "schedule" and result.get("schedule_request"):
         try:
-            schedule = ai.generate_schedule(result["schedule_request"], context=context)
+            schedule = ai.generate_schedule(text, context=context)
             if "raw" in schedule:
                 extra_lines.append(
                     "Не получилось разобрать расписание, попробуй уточнить запрос."

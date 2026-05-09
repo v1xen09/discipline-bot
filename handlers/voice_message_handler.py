@@ -13,7 +13,6 @@ from telegram.ext import ContextTypes
 
 from ai_client import AIClient
 from database import Database
-from voice_handler import WhisperVoiceHandler, YandexSpeechKitHandler
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +104,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         elif intent == "schedule" and result.get("schedule_request"):
             from datetime import date, timedelta
-            schedule = ai.generate_schedule(result["schedule_request"], context=context)
+            schedule = ai.generate_schedule(transcript, context=context)
             monday = date.today() - timedelta(days=date.today().weekday())
             DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
                         "friday", "saturday", "sunday"]

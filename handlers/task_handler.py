@@ -187,6 +187,7 @@ def _tasks_page_keyboard(
             nav.append(InlineKeyboardButton("▶", callback_data=f"tasks:page:{page + 1}"))
         rows.append(nav)
 
+    rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
 

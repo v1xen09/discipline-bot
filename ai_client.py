@@ -1,9 +1,5 @@
 """
-AI client — обёртка над LLM-провайдером (LM Studio или YandexGPT).
-
-Поддерживаемые провайдеры (задаётся через config.AI_PROVIDER):
-  • lmstudio — локальный OpenAI-совместимый сервер LM Studio, openai SDK
-  • yandex   — YandexGPT через Yandex Foundation Models REST API (httpx)
+AI client — обёртка над LM Studio (OpenAI-совместимый локальный сервер).
 
 Возможности:
   • Генерация недельного расписания
@@ -172,6 +168,33 @@ def _strip_json(raw: str) -> str:
     return text
 
 
+def _close_truncated_json(text: str) -> str:
+    """Дописывает недостающие закрывающие скобки к обрезанному JSON.
+    Используется когда модель упёрлась в max_tokens посреди генерации."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    suffix = '"' if in_string else ""
+    suffix += "".join(reversed(stack))
+    return text + suffix
+
+
 def _try_parse_json(raw: str) -> Optional[dict]:
     """Попытаться распарсить JSON разными способами. Если всё провалилось —
     None, и вызывающий код решит, что показывать пользователю."""
@@ -181,36 +204,33 @@ def _try_parse_json(raw: str) -> Optional[dict]:
     except json.JSONDecodeError as e:
         log.warning("JSON parse failed at pos %s: %s | snippet: %r",
                     e.pos, e.msg, cleaned[max(0, e.pos - 40):e.pos + 40])
-        return None
+        # Модель могла упереться в max_tokens посреди строки — пробуем
+        # закрыть незавершённые скобки/строки и распарсить снова.
+        repaired = _close_truncated_json(cleaned)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        try:
+            result = json.loads(repaired)
+            log.info("JSON repaired (truncated response recovered)")
+            return result
+        except json.JSONDecodeError:
+            return None
 
 
 class AIClient:
     def __init__(self, config: Config) -> None:
-        self._provider = config.AI_PROVIDER
-
-        if self._provider == "lmstudio":
-            # trust_env=False важно: иначе httpx подхватит HTTP_PROXY/HTTPS_PROXY
-            # из системы и попытается ходить к localhost через прокси (или VPN),
-            # запрос до LM Studio не дойдёт и мы получим 503/таймаут от прокси.
-            http_client = httpx.Client(
-                trust_env=False,
-                timeout=httpx.Timeout(config.LMSTUDIO_TIMEOUT, connect=10.0),
-            )
-            self.client = OpenAI(
-                base_url=config.LMSTUDIO_BASE_URL,
-                api_key=config.LMSTUDIO_API_KEY,
-                http_client=http_client,
-            )
-            self.model = config.LMSTUDIO_MODEL
-        else:  # yandex
-            self._yandex_url = (
-                "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-            )
-            self._yandex_headers = {"Authorization": f"Api-Key {config.YANDEX_API_KEY}"}
-            self._yandex_model_uri = (
-                f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_MODEL}/latest"
-            )
-            self._yandex_http = httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0))
+        # trust_env=False важно: иначе httpx подхватит HTTP_PROXY/HTTPS_PROXY
+        # из системы и попытается ходить к localhost через прокси (или VPN),
+        # запрос до LM Studio не дойдёт и мы получим 503/таймаут от прокси.
+        http_client = httpx.Client(
+            trust_env=False,
+            timeout=httpx.Timeout(config.LMSTUDIO_TIMEOUT, connect=10.0),
+        )
+        self.client = OpenAI(
+            base_url=config.LMSTUDIO_BASE_URL,
+            api_key=config.LMSTUDIO_API_KEY,
+            http_client=http_client,
+        )
+        self.model = config.LMSTUDIO_MODEL
 
     def _call(
         self,
@@ -219,9 +239,6 @@ class AIClient:
         max_tokens: int = 1500,
         temperature: float = 0.7,
     ) -> str:
-        """Диспетчер: направляет вызов к нужному провайдеру."""
-        if self._provider == "yandex":
-            return self._call_yandex(messages, system, max_tokens, temperature)
         return self._call_lmstudio(messages, system, max_tokens, temperature)
 
     def _call_lmstudio(
@@ -309,53 +326,6 @@ class AIClient:
 
         return content
 
-    def _call_yandex(
-        self,
-        messages: list[dict],
-        system: Optional[str],
-        max_tokens: int,
-        temperature: float,
-    ) -> str:
-        """Вызов через YandexGPT (Yandex Foundation Models REST API)."""
-        yandex_messages: list[dict] = []
-
-        # Yandex принимает system как обычное сообщение с role=system,
-        # поле называется "text", а не "content".
-        if system:
-            yandex_messages.append({
-                "role": "system",
-                "text": f"{system}\n\n{_now_context()}",
-            })
-
-        for msg in messages:
-            yandex_messages.append({"role": msg["role"], "text": msg["content"]})
-
-        body = {
-            "modelUri": self._yandex_model_uri,
-            "completionOptions": {
-                "stream": False,
-                "temperature": temperature,
-                "maxTokens": str(max_tokens),
-            },
-            "messages": yandex_messages,
-        }
-
-        try:
-            resp = self._yandex_http.post(
-                self._yandex_url, headers=self._yandex_headers, json=body
-            )
-            resp.raise_for_status()
-            text = resp.json()["result"]["alternatives"][0]["message"]["text"]
-            log.debug("Yandex raw len=%d", len(text))
-            return text.strip()
-        except Exception as e:
-            body_text = getattr(getattr(e, "response", None), "text", None)
-            if body_text:
-                log.error("Yandex API call failed: %s | body: %s", e, body_text[:500])
-            else:
-                log.error("Yandex API call failed: %s", e)
-            return "Извини, не смог получить ответ от Яндекс AI. Попробуй ещё раз."
-
     # ── Schedule generation ────────────────────────────────────────────────────
 
     def generate_schedule(self, user_request: str, context: str = "") -> dict:
@@ -432,7 +402,11 @@ class AIClient:
         trigger: 'morning' | 'evening' | 'streak_broken' | 'streak_milestone' | 'overdue'
         """
         trigger_hints = {
-            "morning": "Это утреннее приветствие. Зарядь на день, напомни о предстоящих задачах.",
+            "morning": (
+                "Это утреннее приветствие. Зарядь на день, напомни о предстоящих задачах. "
+                "Если в контексте есть данные о погоде — упомяни их и дай краткий совет "
+                "по одежде (1 предложение, без пустых клише)."
+            ),
             "evening": "Это вечерний итог дня. Подведи итоги, отметь достижения, подготовь к завтрашнему.",
             "overdue": "У пользователя есть просроченные задачи. Мягко, но прямо скажи об этом и предложи начать прямо сейчас.",
             "reminder": (
@@ -637,7 +611,7 @@ class AIClient:
         raw = self._call(
             messages=[{"role": "user", "content": prompt}],
             system=build_system_prompt(personality),
-            max_tokens=1500,
+            max_tokens=2000,
             temperature=0.4,
         )
         parsed = _try_parse_json(raw)

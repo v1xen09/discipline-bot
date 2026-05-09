@@ -51,9 +51,12 @@ from handlers.task_handler import (
     task_command,
     tasks_command,
 )
+from handlers.location_handler import handle_location
+from handlers.menu_handler import handle_menu_callback, menu_command
 from handlers.voice_message_handler import handle_voice
 from scheduler_jobs import setup_scheduler
-from voice_handler import create_voice_handler
+from voice_handler import WhisperVoiceHandler
+from weather_client import WeatherClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +74,7 @@ async def _post_init(app: Application) -> None:
     await db.init()
 
     await app.bot.set_my_commands([
+        BotCommand("menu",     "Главное меню"),
         BotCommand("help",     "Справка по всем командам"),
         BotCommand("task",     "Добавить задачу: /task Название | дата"),
         BotCommand("tasks",    "Список активных задач"),
@@ -78,7 +82,6 @@ async def _post_init(app: Application) -> None:
         BotCommand("overdue",  "Просроченные задачи"),
         BotCommand("myplan",   "Расписание на неделю"),
         BotCommand("schedule", "Составить новое расписание с помощью ИИ"),
-        BotCommand("streak",   "Серии выполнения привычек"),
         BotCommand("note",     "Добавить заметку: /note Текст"),
         BotCommand("notes",    "Список всех заметок"),
         BotCommand("pomodoro", "Таймер помодоро: /pomodoro [мин] или stop"),
@@ -103,10 +106,9 @@ async def _post_init(app: Application) -> None:
     api_thread.start()
     log.info("API server started on :8080")
 
-    log.info("TManager ready (mode=%s, ai=%s, stt=%s)",
-             app.bot_data["config"].DEPLOYMENT_MODE,
-             app.bot_data["config"].AI_PROVIDER,
-             app.bot_data["config"].SPEECH_PROVIDER)
+    log.info("TManager ready (model=%s, stt=%s)",
+             app.bot_data["config"].LMSTUDIO_MODEL,
+             app.bot_data["config"].WHISPER_MODEL_SIZE)
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -161,7 +163,8 @@ def main() -> None:
     # делает _post_init уже внутри loop'а PTB.
     db = Database(config.DATABASE_PATH)
     ai = AIClient(config)
-    voice = create_voice_handler(config)
+    voice = WhisperVoiceHandler(config)
+    weather = WeatherClient(config.YANDEX_WEATHER_KEY)
 
     # HTTP-таймауты PTB по умолчанию 5 секунд. Для VPN/прокси этого мало —
     # TLS-рукопожатие через медленный туннель может занять и 10–20 секунд.
@@ -184,6 +187,7 @@ def main() -> None:
     app.bot_data["db"] = db
     app.bot_data["ai"] = ai
     app.bot_data["voice"] = voice
+    app.bot_data["weather"] = weather
 
     # ── Conversation: schedule creation ───────────────────────────────────────
     schedule_conv = ConversationHandler(
@@ -198,6 +202,7 @@ def main() -> None:
     )
 
     # ── Command handlers ───────────────────────────────────────────────────────
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("task", task_command))
@@ -214,10 +219,13 @@ def main() -> None:
     app.add_handler(CommandHandler("pomodoro", pomodoro_command))
     app.add_handler(schedule_conv)
 
-    # ── Voice messages ─────────────────────────────────────────────────────────
+    # ── Voice messages & location ──────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
     # ── Inline keyboard callbacks ──────────────────────────────────────────────
+    # menu: ПЕРВЫМ — до tasks?:, т.к. menu:* не попадает под tasks?:, но для надёжности
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_schedule_callback, pattern=r"^(schedule_|myplan:)"))
     # task:done|delete:<id>[:<page>] — действия по задаче (одиночная карточка или из списка)
     # tasks:page:<n> / tasks:noop   — перелистывание постраничного /tasks

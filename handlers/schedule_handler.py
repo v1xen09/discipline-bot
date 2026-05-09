@@ -572,6 +572,7 @@ def _week_plan_keyboard(grouped: dict, day_key: str) -> InlineKeyboardMarkup:
         (nav1 if i < 4 else nav2).append(btn)
     rows.append(nav1)
     rows.append(nav2)
+    rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
 
     return InlineKeyboardMarkup(rows)
 

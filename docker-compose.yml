@@ -9,10 +9,10 @@ services:
       - db_data:/app/tmanager.db
       - hf_cache:/root/.cache/huggingface
 
-    # --- Раскомментировать для локального запуска с LM Studio на хосте ---
-    # extra_hosts:
-    #   - "host.docker.internal:host-gateway"
-    # (и сменить LMSTUDIO_BASE_URL в .env на http://host.docker.internal:4321/v1)
+    # Нужно для доступа к LM Studio на хосте из контейнера (Windows/Linux).
+    # В .env: LMSTUDIO_BASE_URL=http://host.docker.internal:4321/v1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   db_data:

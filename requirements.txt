@@ -25,3 +25,6 @@ python-dotenv>=1.0.0
 # REST API (для десктопного клиента)
 flask[async]>=3.0.0
 flask-cors>=4.0.0
+
+# HTTP-клиент (LM Studio + Яндекс.Погода + геокодинг)
+httpx>=0.27.0

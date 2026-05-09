@@ -101,6 +101,19 @@ async def _send_morning(app, tg_id, user_id, db, ai, personality) -> None:
     upcoming = await db.get_upcoming_tasks(user_id, days=1)
     overdue = await db.get_overdue_tasks(user_id)
 
+    # Прогноз погоды — молча пропускаем если ключ/координаты не заданы
+    weather_client = app.bot_data.get("weather")
+    if weather_client and weather_client.enabled:
+        loc = await db.get_location(tg_id)
+        if loc.get("lat") and loc.get("lon"):
+            w = await weather_client.get_weather(loc["lat"], loc["lon"])
+            if w:
+                city_label = f" в {loc['city']}" if loc.get("city") else ""
+                context += (
+                    f"\n\nПогода{city_label}: {w['condition']}, {w['temp']}°C "
+                    f"(ощущается как {w['feels_like']}°C), ветер {w['wind_speed']} м/с."
+                )
+
     trigger = "overdue" if overdue else "morning"
     text = ai.generate_motivation(context, trigger=trigger, personality=personality)
 

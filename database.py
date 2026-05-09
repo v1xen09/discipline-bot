@@ -121,6 +121,9 @@ class Database:
                 "ALTER TABLE users ADD COLUMN notify_morning TEXT DEFAULT '08:00'",
                 "ALTER TABLE users ADD COLUMN notify_evening TEXT DEFAULT '21:00'",
                 "ALTER TABLE users ADD COLUMN notify_reminders TEXT DEFAULT '12:00,17:00'",
+                "ALTER TABLE users ADD COLUMN city TEXT DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN lat REAL DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN lon REAL DEFAULT NULL",
             ):
                 try:
                     await db.execute(stmt)
@@ -765,6 +768,35 @@ class Database:
             )
             await db.commit()
 
+    # ─── Location / weather helpers ───────────────────────────────────────────
+
+    async def get_location(self, telegram_id: int) -> dict:
+        """Вернуть {"city": str|None, "lat": float|None, "lon": float|None}."""
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT city, lat, lon FROM users WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return {"city": None, "lat": None, "lon": None}
+            return {"city": row[0], "lat": row[1], "lon": row[2]}
+
+    async def set_location(
+        self,
+        telegram_id: int,
+        *,
+        city: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+    ) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE users SET city = ?, lat = ?, lon = ? WHERE telegram_id = ?",
+                (city, lat, lon, telegram_id),
+            )
+            await db.commit()
+
     # ─── Schedule helpers ──────────────────────────────────────────────────────
 
     async def save_schedule(
@@ -1096,10 +1128,15 @@ class Database:
             )
             planned = (await cur.fetchone())[0] or 0
 
+            # Считаем только выполнения задач, запланированных на этот день
+            # или recurring. Просроченные задачи, выполненные сегодня, не
+            # должны влиять на коэффициент дня — они не были в плане на сегодня.
             cur = await db.execute(
-                """SELECT COUNT(*) FROM completions
-                   WHERE user_id = ? AND completed_on = ?""",
-                (user_id, day_iso),
+                """SELECT COUNT(*) FROM completions c
+                   JOIN tasks t ON t.id = c.task_id
+                   WHERE c.user_id = ? AND c.completed_on = ?
+                     AND (t.due_date = ? OR t.recurring IS NOT NULL)""",
+                (user_id, day_iso, day_iso),
             )
             completed = (await cur.fetchone())[0] or 0
 
