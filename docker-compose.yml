@@ -1,0 +1,19 @@
+services:
+  tmanager:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"        # REST API (запускается внутри того же процесса)
+    volumes:
+      - db_data:/app/tmanager.db
+      - hf_cache:/root/.cache/huggingface
+
+    # --- Раскомментировать для локального запуска с LM Studio на хосте ---
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    # (и сменить LMSTUDIO_BASE_URL в .env на http://host.docker.internal:4321/v1)
+
+volumes:
+  db_data:
+  hf_cache:

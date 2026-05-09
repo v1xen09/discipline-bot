@@ -1,0 +1,702 @@
+"""
+AI client — обёртка над LLM-провайдером (LM Studio или YandexGPT).
+
+Поддерживаемые провайдеры (задаётся через config.AI_PROVIDER):
+  • lmstudio — локальный OpenAI-совместимый сервер LM Studio, openai SDK
+  • yandex   — YandexGPT через Yandex Foundation Models REST API (httpx)
+
+Возможности:
+  • Генерация недельного расписания
+  • Мотивационные сообщения с учётом дневника
+  • Свободный диалог по задачам
+  • Извлечение действий из транскрипции голоса
+  • Синтез записей в дневник наблюдений
+"""
+
+import json
+import logging
+import re
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+import httpx
+from openai import OpenAI
+
+WEEKDAYS_RU = [
+    "понедельник", "вторник", "среда", "четверг",
+    "пятница", "суббота", "воскресенье",
+]
+
+
+def _part_of_day(hour: int) -> str:
+    if hour < 6:
+        return "ночь"
+    if hour < 12:
+        return "утро"
+    if hour < 18:
+        return "день"
+    return "вечер"
+
+
+def _now_context() -> str:
+    """Короткая строка, описывающая «сейчас» — день недели, дату, время.
+    Без неё модель не может сама ответить на вопрос «что сегодня?»."""
+    now = datetime.now()
+    return (
+        f"Сейчас {WEEKDAYS_RU[now.weekday()]}, "
+        f"{now.strftime('%d.%m.%Y %H:%M')} ({_part_of_day(now.hour)})."
+    )
+
+from config import Config
+
+log = logging.getLogger(__name__)
+
+# ── System prompt that gives the bot its personality ──────────────────────────
+
+# ── Характеры бота ────────────────────────────────────────────────────────────
+# Базовая «механика» (правила работы с задачами и форматом) — общая для всех,
+# она в SYSTEM_BASE. Тон/манера общения — отдельным блоком из PERSONALITIES,
+# выбирается пользователем через /settings.
+
+SYSTEM_BASE = """/no_think
+Ты — TManager, ИИ-помощник по продуктивности.
+Ты помнишь историю пользователя (она передаётся в контексте) и отслеживаешь
+его задачи и серии.
+
+Общие правила работы:
+1. Ты НИКОГДА не придумываешь задачи или события, которых нет в контексте.
+2. Используй эмодзи умеренно — только там, где они усиливают смысл.
+3. Ответы лаконичны (2–4 предложения), если пользователь не просит подробностей.
+4. Никаких рассуждений в <think>…</think> — отвечай сразу по существу.
+"""
+
+PERSONALITIES: dict[str, str] = {
+    "soft": (
+        "Стиль общения — мягкий и тёплый. Ты дружелюбен, чуток, поддерживаешь, "
+        "но не сюсюкаешь и не льстишь пустыми словами. Радуешься успехам, "
+        "сочувствуешь срывам, никогда не давишь."
+    ),
+    "neutral": (
+        "Стиль общения — нейтральный и деловой. Без эмоциональных ярлыков, "
+        "без «молодец/жалко». Сухой, ясный, по делу. Минимум эмодзи."
+    ),
+    "strict": (
+        "Стиль общения — жёсткий и требовательный. Ты прямой и честный, "
+        "не оправдываешь прокрастинацию, не жалеешь, ставишь дисциплину "
+        "выше комфорта. Не оскорбляешь и не унижаешь, но и не утешаешь, "
+        "если человек не делает то, что обещал. Когда видишь успех — "
+        "признаёшь его коротко, без восторгов."
+    ),
+    "playful": (
+        "Стиль общения — игривый и лёгкий. Ты шутишь, иронизируешь над "
+        "ситуациями, используешь сравнения и метафоры. Но не превращаешь "
+        "разговор в стендап — суть не теряется. Эмодзи приветствуются."
+    ),
+}
+
+PERSONALITY_LABELS: dict[str, str] = {
+    "soft": "🫂 Мягкий",
+    "neutral": "📐 Нейтральный",
+    "strict": "🪖 Требовательный",
+    "playful": "🎭 Игривый",
+}
+
+
+def build_system_prompt(personality: str = "soft") -> str:
+    """Собрать системный промпт под конкретный характер."""
+    persona = PERSONALITIES.get(personality, PERSONALITIES["soft"])
+    return f"{SYSTEM_BASE}\n{persona}"
+
+
+# Совместимость для остальных модулей, которые импортировали SYSTEM_PROMPT.
+SYSTEM_PROMPT = build_system_prompt("soft")
+
+
+def _extract_balanced_json(text: str) -> Optional[str]:
+    """Найти первый сбалансированный {…}-блок (учитывает строки и эскейпы).
+    Регулярка `\\{.*\\}` ловит ОТ первого { ДО последнего }, что часто
+    захватывает мусор. Здесь идём по строке и считаем глубину скобок."""
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start != -1:
+                return text[start:i + 1]
+    return None
+
+
+def _strip_json(raw: str) -> str:
+    """Вытащить JSON из ответа модели, даже если она обернула его в markdown,
+    добавила <think>…</think> или поставила лишние запятые."""
+    text = raw.strip()
+
+    # Убираем reasoning-блок, если модель его выдала
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    # Снимаем ```json … ``` или просто ``` … ```
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if "```" in text:
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+
+    # Берём сбалансированный JSON-блок (надёжнее, чем .*? между { и })
+    extracted = _extract_balanced_json(text)
+    if extracted:
+        text = extracted
+
+    # Чиним типичные ошибки моделей: trailing-запятая перед } или ].
+    # `{"a": 1,}` → `{"a": 1}`, `[1, 2,]` → `[1, 2]`.
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+
+    return text
+
+
+def _try_parse_json(raw: str) -> Optional[dict]:
+    """Попытаться распарсить JSON разными способами. Если всё провалилось —
+    None, и вызывающий код решит, что показывать пользователю."""
+    cleaned = _strip_json(raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        log.warning("JSON parse failed at pos %s: %s | snippet: %r",
+                    e.pos, e.msg, cleaned[max(0, e.pos - 40):e.pos + 40])
+        return None
+
+
+class AIClient:
+    def __init__(self, config: Config) -> None:
+        self._provider = config.AI_PROVIDER
+
+        if self._provider == "lmstudio":
+            # trust_env=False важно: иначе httpx подхватит HTTP_PROXY/HTTPS_PROXY
+            # из системы и попытается ходить к localhost через прокси (или VPN),
+            # запрос до LM Studio не дойдёт и мы получим 503/таймаут от прокси.
+            http_client = httpx.Client(
+                trust_env=False,
+                timeout=httpx.Timeout(config.LMSTUDIO_TIMEOUT, connect=10.0),
+            )
+            self.client = OpenAI(
+                base_url=config.LMSTUDIO_BASE_URL,
+                api_key=config.LMSTUDIO_API_KEY,
+                http_client=http_client,
+            )
+            self.model = config.LMSTUDIO_MODEL
+        else:  # yandex
+            self._yandex_url = (
+                "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+            )
+            self._yandex_headers = {"Authorization": f"Api-Key {config.YANDEX_API_KEY}"}
+            self._yandex_model_uri = (
+                f"gpt://{config.YANDEX_FOLDER_ID}/{config.YANDEX_MODEL}/latest"
+            )
+            self._yandex_http = httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0))
+
+    def _call(
+        self,
+        messages: list[dict],
+        system: Optional[str] = None,
+        max_tokens: int = 1500,
+        temperature: float = 0.7,
+    ) -> str:
+        """Диспетчер: направляет вызов к нужному провайдеру."""
+        if self._provider == "yandex":
+            return self._call_yandex(messages, system, max_tokens, temperature)
+        return self._call_lmstudio(messages, system, max_tokens, temperature)
+
+    def _call_lmstudio(
+        self,
+        messages: list[dict],
+        system: Optional[str],
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        """Вызов через LM Studio (OpenAI-совместимый сервер)."""
+        # В каждый вызов подмешиваем актуальное «сейчас» — модель сама не знает,
+        # какое сегодня число и день недели. Без этого расписание получается
+        # «в вакууме», и фразы про «сегодня/завтра» в чате тоже не работают.
+        time_block = _now_context()
+        system_full = f"{system}\n\n{time_block}" if system else time_block
+
+        full_messages: list[dict] = [{"role": "system", "content": system_full}]
+        full_messages.extend(messages)
+
+        # Qwen3 надёжнее всего отключается от рассуждений, если /no_think стоит
+        # в самом КОНЦЕ последнего user-сообщения. Тут мы это и делаем —
+        # добавляем директиву к последнему user-message прямо перед отправкой,
+        # не трогая исходный список (он принадлежит вызывающему коду).
+        if full_messages and full_messages[-1].get("role") == "user":
+            last = dict(full_messages[-1])
+            last["content"] = f"{last['content']}\n\n/no_think"
+            full_messages = full_messages[:-1] + [last]
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=full_messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                # Параметр LM Studio/llama.cpp: запрещает «рассуждение» на уровне
+                # template'а. Не все модели его поддерживают, для тех что нет —
+                # просто игнорируется.
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+        except Exception as e:
+            # Покажем тело ответа от LM Studio, если оно есть — оно обычно
+            # содержит человеко-читаемую причину (например, «Model not loaded»
+            # или «Model not found»). По одному тексту 503 ничего не понять.
+            body = getattr(getattr(e, "response", None), "text", None)
+            if body:
+                log.error("LM Studio call failed: %s | body: %s", e, body[:500])
+            else:
+                log.error("LM Studio call failed: %s", e)
+            raise
+
+        raw = response.choices[0].message.content or ""
+        finish = response.choices[0].finish_reason
+        log.debug("LM Studio raw len=%d finish=%s", len(raw), finish)
+
+        content = raw
+
+        # 1) Удаляем все полностью закрытые <think>…</think> блоки.
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+
+        # 2) Если остался осиротевший <think> (модель упёрлась в max_tokens
+        #    посреди размышления), берём всё, что было ДО него — это и есть
+        #    «настоящий» ответ, если модель успела его выдать раньше.
+        #    Если до тега ничего не было (модель сразу ушла думать и не успела
+        #    ничего сказать) — fallback'ом возьмём её незакрытое размышление,
+        #    лучше так, чем отдать пустоту.
+        if "<think>" in content:
+            before, _, after = content.partition("<think>")
+            if before.strip():
+                content = before
+            else:
+                content = after  # незакрытое thinking как фолбэк
+
+        content = content.strip()
+
+        if not content:
+            log.warning(
+                "LM Studio returned no usable content (finish=%s, raw_len=%d). "
+                "Снимок начала ответа: %r",
+                finish, len(raw), raw[:200],
+            )
+            content = (
+                "Хм, не сформулировал ответ — модель ушла в размышления и не успела "
+                "выдать результат. Попробуй ещё раз или перефразируй."
+            )
+
+        return content
+
+    def _call_yandex(
+        self,
+        messages: list[dict],
+        system: Optional[str],
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        """Вызов через YandexGPT (Yandex Foundation Models REST API)."""
+        yandex_messages: list[dict] = []
+
+        # Yandex принимает system как обычное сообщение с role=system,
+        # поле называется "text", а не "content".
+        if system:
+            yandex_messages.append({
+                "role": "system",
+                "text": f"{system}\n\n{_now_context()}",
+            })
+
+        for msg in messages:
+            yandex_messages.append({"role": msg["role"], "text": msg["content"]})
+
+        body = {
+            "modelUri": self._yandex_model_uri,
+            "completionOptions": {
+                "stream": False,
+                "temperature": temperature,
+                "maxTokens": str(max_tokens),
+            },
+            "messages": yandex_messages,
+        }
+
+        try:
+            resp = self._yandex_http.post(
+                self._yandex_url, headers=self._yandex_headers, json=body
+            )
+            resp.raise_for_status()
+            text = resp.json()["result"]["alternatives"][0]["message"]["text"]
+            log.debug("Yandex raw len=%d", len(text))
+            return text.strip()
+        except Exception as e:
+            body_text = getattr(getattr(e, "response", None), "text", None)
+            if body_text:
+                log.error("Yandex API call failed: %s | body: %s", e, body_text[:500])
+            else:
+                log.error("Yandex API call failed: %s", e)
+            return "Извини, не смог получить ответ от Яндекс AI. Попробуй ещё раз."
+
+    # ── Schedule generation ────────────────────────────────────────────────────
+
+    def generate_schedule(self, user_request: str, context: str = "") -> dict:
+        """
+        Generate a structured weekly schedule based on user's description.
+        Returns a dict: {weekday_name: [{time, task, description}]}
+        """
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        today_ru = WEEKDAYS_RU[today.weekday()]
+
+        context_block = f"\n\nКонтекст пользователя:\n{context}" if context else ""
+
+        prompt = f"""Пользователь просит составить расписание на неделю.
+Запрос: «{user_request}»{context_block}
+
+Сегодня — {today_ru}, {today.strftime('%d.%m.%Y')}.
+Неделя с {monday.strftime('%d.%m.%Y')} (пн) по {(monday + timedelta(days=6)).strftime('%d.%m.%Y')} (вс).
+Прошедшие дни недели не планируй — оставь их пустыми массивами.
+
+КРИТИЧНО — НЕ выдумывай задачи:
+- В план попадает ТОЛЬКО то, что пользователь явно описал в запросе.
+- Если запрос короткий — расписание тоже короткое. Это нормально.
+  НЕ заполняй пустые дни «на всякий случай», НЕ добавляй приёмы пищи,
+  прогулки, отдых, сон, медитации, чтение и прочие активности, если
+  пользователь о них не сказал.
+- Если пользователь упомянул только одну активность — расписание
+  состоит ровно из неё (и только в дни, где она уместна).
+
+ПРО НАЗВАНИЯ ЗАДАЧ:
+- КОРОТКИЕ (1–3 слова), повторяющиеся для одной и той же привычки.
+- Одна привычка = ОДНО название. «Алгебра» во все дни недели; НЕ «Решить
+  5 задач», «Прочитать главу» — это разные задачи, ломают учёт.
+- Детали активности — в "description", а не в "task".
+- Поле "time" опционально: если пользователь не указал время, оставь
+  пустую строку "" или null.
+
+Верни расписание СТРОГО в виде JSON (без markdown, без пояснений):
+{{
+  "monday":    [{{"time": "09:00", "task": "Название", "description": "детали"}}],
+  "tuesday":   [...],
+  "wednesday": [...],
+  "thursday":  [...],
+  "friday":    [...],
+  "saturday":  [...],
+  "sunday":    [...]
+}}
+
+Правила:
+- Каждый день 3–6 задач, реалистично распределённых по времени.
+- Учитывай контекст пользователя, его текущие задачи и серии.
+- Выходные можно сделать легче.
+- Всегда добавляй время для отдыха и одну маленькую приятную активность.
+- ВАЖНО: ответ должен быть только валидным JSON, без пояснений и markdown.
+"""
+        raw = self._call(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4000,
+            temperature=0.6,
+        )
+        parsed = _try_parse_json(raw)
+        if parsed is None:
+            log.warning("Failed to parse schedule JSON, returning raw: %s", raw[:300])
+            return {"raw": raw}
+        return parsed
+
+    # ── Motivation ─────────────────────────────────────────────────────────────
+
+    def generate_motivation(
+        self, context: str, trigger: str = "morning", personality: str = "soft"
+    ) -> str:
+        """
+        Generate a motivational message using the user's diary/task context.
+        trigger: 'morning' | 'evening' | 'streak_broken' | 'streak_milestone' | 'overdue'
+        """
+        trigger_hints = {
+            "morning": "Это утреннее приветствие. Зарядь на день, напомни о предстоящих задачах.",
+            "evening": "Это вечерний итог дня. Подведи итоги, отметь достижения, подготовь к завтрашнему.",
+            "overdue": "У пользователя есть просроченные задачи. Мягко, но прямо скажи об этом и предложи начать прямо сейчас.",
+            "reminder": (
+                "Это дневное напоминание о невыполненных задачах. Упомяни конкретные дела из контекста. "
+                "Не паникуй и не давай длинных инструкций — просто напомни, что дела ждут, и дай лёгкий импульс действовать."
+            ),
+            "rate_high":
+                "Коэффициент дня высокий (≥80%). Признай результат — коротко, без преувеличений.",
+            "rate_mid":
+                "Коэффициент дня средний (50–80%). Отметь, что есть прогресс, и предложи добить остаток.",
+            "rate_low":
+                "Коэффициент дня низкий (<50%). Согласно своему характеру: либо мягко поддержи и предложи маленький шаг, "
+                "либо честно укажи на провал — но НЕ оскорбляй и НЕ обесценивай. Спроси, что мешает.",
+        }
+        hint = trigger_hints.get(trigger, "Напиши поддерживающее сообщение.")
+
+        prompt = f"""Контекст пользователя:\n{context}\n\n{hint}\n
+Ответ — 2–3 предложения, тёплые, честные. Используй данные из контекста."""
+
+        return self._call(
+            messages=[{"role": "user", "content": prompt}],
+            system=build_system_prompt(personality),
+            max_tokens=300,
+            temperature=0.8,
+        )
+
+    # ── Free-form chat ─────────────────────────────────────────────────────────
+
+    def chat(
+        self,
+        user_message: str,
+        context: str,
+        history: Optional[list[dict]] = None,
+        personality: str = "soft",
+    ) -> str:
+        """
+        Respond to a free-form user message, with diary context injected.
+        history: list of {role, content} for multi-turn.
+        """
+        system = build_system_prompt(personality)
+        if context:
+            system += f"\n\n=== Контекст пользователя ===\n{context}"
+
+        messages: list[dict] = []
+        if history:
+            messages.extend(history[-6:])  # keep last 3 exchanges
+        messages.append({"role": "user", "content": user_message})
+
+        return self._call(messages=messages, system=system, max_tokens=1200, temperature=0.7)
+
+    # ── Intent routing for free-form user messages (voice OR text) ────────────
+
+    def process_user_intent(
+        self,
+        message: str,
+        context: str,
+        history: Optional[list[dict]] = None,
+        personality: str = "soft",
+    ) -> dict:
+        """
+        Универсальный «маршрутизатор» свободных сообщений пользователя.
+        Используется и для голосовых, и для текстовых.
+
+        Возвращает dict с полем `intent`, набором действий и
+        готовым `reply` для отправки в чат — это позволяет за ОДИН
+        вызов LLM и понять намерение, и сформулировать ответ.
+
+        Возможные intent:
+          • add_tasks     — добавить задачу/задачи
+          • done_tasks    — отметить выполненными
+          • delete_tasks  — удалить из списка
+          • schedule      — составить недельный план
+          • motivation    — запрос поддержки
+          • chat          — всё остальное (вопросы, болтовня)
+        """
+        history_block = ""
+        if history:
+            recent = history[-6:]
+            lines = []
+            for h in recent:
+                speaker = "Пользователь" if h.get("role") == "user" else "Ты"
+                lines.append(f"{speaker}: {h.get('content', '')}")
+            history_block = "\n\nНедавняя переписка:\n" + "\n".join(lines)
+
+        prompt = f"""Сообщение пользователя:
+«{message}»{history_block}
+
+Контекст пользователя:
+{context}
+
+Определи намерение и СРАЗУ сформулируй ответ пользователю.
+Верни JSON (без markdown, без пояснений):
+{{
+  "intent": "add_tasks" | "done_tasks" | "delete_tasks" | "schedule" | "modify_schedule" | "add_note" | "delete_note" | "set_priority" | "set_reminder" | "set_task_time" | "motivation" | "chat",
+  "tasks": [{{"title": "...", "due_date": "YYYY-MM-DD или null", "time": "HH:MM или null", "recurring": "daily|weekly|null", "priority": "high|medium|low|null"}}],
+  "done_task_ids": [12, 15],
+  "delete_task_ids": [7],
+  "note_text": "текст заметки или null",
+  "delete_note_ids": [3, 7],
+  "schedule_request": "текст запроса на расписание или null",
+  "schedule_changes": [
+    {{"op": "add",    "day": "monday|tuesday|...|sunday", "time": "HH:MM", "task": "...", "description": "..."}},
+    {{"op": "remove", "day": "monday", "task": "Алгебра"}},
+    {{"op": "move",   "from_day": "friday", "to_day": "thursday", "task": "Зарядка", "new_time": "08:00"}}
+  ],
+  "priority_changes": [{{"task_id": 5, "priority": "high|medium|low|null"}}],
+  "reminder_changes": [{{"task_id": 5, "minutes": 30}}],
+  "time_changes": [{{"task_id": 5, "time": "HH:MM или null"}}],
+  "reply": "ответ пользователю в твоём стиле, 2–4 предложения"
+}}
+
+Правила распознавания intent (ВНИМАТЕЛЬНО, это часто путают):
+
+- add_tasks: пользователь называет ОДНУ или НЕСКОЛЬКО конкретных задач,
+  которые надо добавить. Если он указал день/время («завтра», «в пятницу
+  в 14:00», «сегодня вечером») — это всё равно add_tasks, просто заполняй
+  поля due_date и time. НЕ пытайся «составить план дня» из одной задачи.
+  Примеры:
+    • «надо купить хлеб» → add_tasks, due_date=null, time=null
+    • «запланируй сегодня купить хлеб» → add_tasks, due_date=сегодня, time=null
+    • «добавь на завтра в 15:00 встречу с врачом» → add_tasks, due_date=завтра, time=15:00
+    • «надо сделать зарядку и купить хлеб» → add_tasks с двумя элементами
+
+- schedule: пользователь ЯВНО просит составить план/расписание на несколько
+  дней или на всю неделю С НУЛЯ. Только когда есть слова вроде «расписание»,
+  «план на неделю», «распиши неделю», «составь график». Перетирает текущий план.
+  Примеры:
+    • «составь расписание на неделю» → schedule
+    • «распиши мне план на эти 3 дня по учёбе» → schedule
+  ВАЖНО: «запланируй на сегодня X» — это НЕ schedule, это add_tasks.
+
+- modify_schedule: правки В ТЕКУЩЕМ плане, без пересборки. Перенос или
+  удаление существующих пунктов между днями. Если пользователь добавляет
+  новую задачу на день — это add_tasks (а не modify_schedule add).
+    • «убери алгебру в среду» → modify_schedule remove
+    • «перенеси встречу с врачом с пятницы на четверг» → modify_schedule move
+
+- done_tasks: сообщает о выполнении уже существующей задачи.
+- delete_tasks: просит удалить существующую задачу из списка.
+- add_note: просит запомнить мысль, идею или факт НЕ как задачу, а как заметку.
+  Ключевые слова: «запомни», «сохрани», «отметь», «запиши в заметки», «сделай заметку».
+  note_text — сформулированный текст заметки (одно-два предложения, суть).
+  Примеры:
+    • «запомни, что я хочу прочитать книгу "Атомные привычки"» → add_note
+    • «сохрани идею: переосмыслить архитектуру проекта» → add_note
+    • «запиши — нужно позвонить врачу на следующей неделе» → add_note
+    НЕ add_note: «добавь задачу позвонить врачу» — это add_tasks.
+- delete_note: просит удалить заметку. delete_note_ids берёт из «Последние заметки (с ID)» в контексте.
+- set_priority: пользователь явно просит изменить приоритет СУЩЕСТВУЮЩЕЙ задачи.
+  priority_changes — список изменений; task_id берёт из «Активные задачи (с ID)».
+  priority=null означает «убрать приоритет».
+  Примеры:
+    • «поставь высокий приоритет задаче купить хлеб» → set_priority, priority=high
+    • «убери приоритет с отчёта» → set_priority, priority=null
+    • «сделай задачу зарядка низкоприоритетной» → set_priority, priority=low
+- set_reminder: установить или убрать напоминание для СУЩЕСТВУЮЩЕЙ задачи.
+  task_id берётся из «Активные задачи (с ID)».
+  minutes: число минут до начала задачи (10/15/30/60/90/120 или иное разумное).
+  0 = убрать напоминание.
+  Если у задачи нет ⏰ времени (нет суффикса ⏰HH:MM в контексте) — в reply
+  честно скажи, что нужно сначала задать время задаче.
+  Примеры:
+    • «напомни за 30 минут до встречи с врачом» → set_reminder, minutes=30
+    • «поставь будильник за час до тренировки» → set_reminder, minutes=60
+    • «убери напоминание с задачи купить хлеб» → set_reminder, minutes=0
+
+- set_task_time: задать или изменить время для СУЩЕСТВУЮЩЕЙ задачи.
+  task_id из «Активные задачи (с ID)». time: "HH:MM" или null (убрать время).
+  Примеры:
+    • «встреча с врачом теперь в 15:00» → set_task_time, time="15:00"
+    • «убери время с задачи купить хлеб» → set_task_time, time=null
+
+- motivation: ищет поддержку, признание.
+- chat: вопросы, разговоры, благодарности, всё остальное.
+
+ПРАВИЛА для поля priority в add_tasks:
+- Заполняй ТОЛЬКО если пользователь ЯВНО упомянул приоритет: «срочно», «важно»,
+  «высокий приоритет», «не срочно», «низкий приоритет» и т.п.
+- НЕ присваивай приоритет автоматически на основе логики.
+- Если пользователь не упоминал приоритет — оставляй null.
+
+КРИТИЧНО для done_tasks / delete_tasks:
+- Используй СПИСОК «Активные задачи (с ID)» из контекста — у каждой задачи
+  указан id в формате [id=N].
+- В done_task_ids и delete_task_ids клади РОВНО эти числа.
+- Сопоставление по СМЫСЛУ: «удали покупки» матчится на «Купить хлеб» (id=12).
+- Если задачи нет — оставь массив пустым и в reply честно скажи об этом.
+
+КРИТИЧНО для modify_schedule:
+- day, from_day, to_day — на английском в нижнем регистре: monday/tuesday/
+  wednesday/thursday/friday/saturday/sunday.
+- op = "add"     требует поля: day, time, task; description опционально.
+- op = "remove"  требует поля: day, task (название как оно в плане).
+- op = "move"    требует поля: from_day, to_day, task; new_time опционально.
+- Можно вернуть НЕСКОЛЬКО изменений за один запрос, если пользователь
+  попросил несколько правок сразу.
+
+ВАЖНО:
+- Поля заполняются ТОЛЬКО если intent им соответствует. Иначе — пустые / null.
+- Ответ — только валидный JSON, без markdown и без пояснений.
+"""
+        raw = self._call(
+            messages=[{"role": "user", "content": prompt}],
+            system=build_system_prompt(personality),
+            max_tokens=1500,
+            temperature=0.4,
+        )
+        parsed = _try_parse_json(raw)
+        if parsed is None:
+            log.warning("Failed to parse intent JSON: %s", raw[:300])
+            return {
+                "intent": "chat",
+                "tasks": [],
+                "done_task_titles": [],
+                "delete_task_titles": [],
+                "schedule_request": None,
+                "reply": raw,
+            }
+        # Защищаем от отсутствия ключей — модель может пропустить пустые поля.
+        parsed.setdefault("tasks", [])
+        parsed.setdefault("done_task_ids", [])
+        parsed.setdefault("delete_task_ids", [])
+        parsed.setdefault("done_task_titles", [])
+        parsed.setdefault("delete_task_titles", [])
+        parsed.setdefault("note_text", None)
+        parsed.setdefault("delete_note_ids", [])
+        parsed.setdefault("schedule_request", None)
+        parsed.setdefault("schedule_changes", [])
+        parsed.setdefault("priority_changes", [])
+        parsed.setdefault("reminder_changes", [])
+        parsed.setdefault("time_changes", [])
+        parsed.setdefault("reply", "")
+        parsed.setdefault("intent", "chat")
+        return parsed
+
+    # Совместимость со старым вызовом из voice_message_handler — пусть оба имени
+    # работают, чтобы не ломать ничего.
+    def process_voice_transcript(self, transcript: str, context: str) -> dict:
+        return self.process_user_intent(transcript, context)
+
+    # ── Diary synthesis ────────────────────────────────────────────────────────
+
+    def synthesize_diary_entry(self, recent_events: str, user_context: str) -> Optional[str]:
+        """
+        Like sleep consolidation — synthesize key observations
+        from recent interactions into a compact diary entry.
+        """
+        prompt = f"""На основе недавних событий пользователя сформулируй краткую запись в дневник (1–2 предложения).
+Это внутренняя заметка для тебя о характере, привычках и прогрессе пользователя.
+
+Недавние события:
+{recent_events}
+
+Контекст:
+{user_context}
+
+Дай только текст записи, без пояснений. Пиши от первого лица ("я заметил...")."""
+        try:
+            return self._call(
+                messages=[{"role": "user", "content": prompt}],
+                system=SYSTEM_PROMPT,
+                max_tokens=200,
+                temperature=0.7,
+            )
+        except Exception as e:
+            log.warning("Diary synthesis failed: %s", e)
+            return None
