@@ -124,6 +124,7 @@ class Database:
                 "ALTER TABLE users ADD COLUMN city TEXT DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN lat REAL DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN lon REAL DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN notify_weather INTEGER NOT NULL DEFAULT 0",
             ):
                 try:
                     await db.execute(stmt)
@@ -346,9 +347,9 @@ class Database:
                 if await cur2.fetchone():
                     await db.execute(
                         """UPDATE schedules
-                           SET previous_json = schedule_json, schedule_json = '{}'
+                           SET previous_json = ?, schedule_json = '{}'
                            WHERE user_id = ? AND week_start = ?""",
-                        (user_id, monday_iso),
+                        (prev_json, user_id, monday_iso),
                     )
                 else:
                     await db.execute(
@@ -594,17 +595,26 @@ class Database:
 
     async def find_tasks_by_title(self, user_id: int, query: str, limit: int = 5) -> list[dict]:
         """Нечёткий поиск задач по подстроке в названии. Используется AI-роутером
-        для удаления/завершения задач по фразе пользователя."""
-        q = f"%{query.strip().lower()}%"
+        для удаления/завершения задач по фразе пользователя.
+        Регистрируем Python str.lower как SQLite-функцию — она корректно
+        обрабатывает кириллицу, в отличие от встроенного SQLite LOWER()."""
+        q_lower = query.strip().lower()
         async with aiosqlite.connect(self.path) as db:
+            await db.create_function("lower_py", 1, str.lower)
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT * FROM tasks
+                """SELECT *,
+                     CASE
+                       WHEN lower_py(title) = ?    THEN 0
+                       WHEN lower_py(title) LIKE ? THEN 1
+                       ELSE                             2
+                     END AS match_rank
+                   FROM tasks
                    WHERE user_id = ? AND completed = 0
-                     AND LOWER(title) LIKE ?
-                   ORDER BY due_date ASC NULLS LAST
+                     AND lower_py(title) LIKE ?
+                   ORDER BY match_rank, due_date ASC NULLS LAST
                    LIMIT ?""",
-                (user_id, q, limit),
+                (q_lower, f"{q_lower}%", user_id, f"%{q_lower}%", limit),
             )
             return [dict(r) for r in await cur.fetchall()]
 
@@ -740,17 +750,26 @@ class Database:
     async def get_notification_settings(self, telegram_id: int) -> dict:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "SELECT notify_morning, notify_evening, notify_reminders FROM users WHERE telegram_id = ?",
+                "SELECT notify_morning, notify_evening, notify_reminders, notify_weather FROM users WHERE telegram_id = ?",
                 (telegram_id,),
             )
             row = await cur.fetchone()
             if not row:
-                return {"morning": "08:00", "evening": "21:00", "reminders": "12:00,17:00"}
+                return {"morning": "08:00", "evening": "21:00", "reminders": "12:00,17:00", "weather": False}
             return {
                 "morning": row[0] or None,
                 "evening": row[1] or None,
                 "reminders": row[2] or None,
+                "weather": bool(row[3]),
             }
+
+    async def set_weather_notification(self, telegram_id: int, enabled: bool) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE users SET notify_weather = ? WHERE telegram_id = ?",
+                (1 if enabled else 0, telegram_id),
+            )
+            await db.commit()
 
     async def set_notification_settings(
         self,

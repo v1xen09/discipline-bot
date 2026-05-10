@@ -96,26 +96,69 @@ async def _notification_dispatcher(app: Application) -> None:
 
 # ─── Message senders ───────────────────────────────────────────────────────────
 
+def _format_weather_block(w: dict, city: str | None) -> str:
+    """Форматирует блок погоды с советом по одежде для конца утреннего сообщения."""
+    temp = w["temp"]
+    feels = w["feels_like"]
+    condition = w["condition"]
+    wind = w["wind_speed"]
+
+    rain_words = {"дождь", "морось", "ливень", "мокрый снег"}
+    snow_words = {"снег", "снегопад", "лёгкий снег"}
+    is_rain = any(r in condition for r in rain_words)
+    is_snow = any(r in condition for r in snow_words)
+
+    if is_snow or temp < -10:
+        advice = "Одевайтесь очень тепло."
+    elif is_rain:
+        advice = "Возьмите зонт."
+    elif temp < 0:
+        advice = "На улице мороз — тёплая куртка и шапка."
+    elif temp < 10:
+        advice = "Оденьтесь тепло."
+    elif temp < 18:
+        advice = "Лёгкая куртка не помешает."
+    elif temp < 26:
+        advice = "Комфортно — одевайтесь по погоде."
+    else:
+        advice = "Жарко — одевайтесь налегке."
+
+    loc_str = f" в {city}" if city else ""
+    sign = "+" if temp > 0 else ""
+    feels_sign = "+" if feels > 0 else ""
+    return (
+        f"🌤 <b>Погода{loc_str}:</b> {condition}, {sign}{temp}°C "
+        f"(ощущается {feels_sign}{feels}°C), ветер {wind} м/с. {advice}"
+    )
+
+
 async def _send_morning(app, tg_id, user_id, db, ai, personality) -> None:
     context = await db.get_user_summary_context(tg_id)
     upcoming = await db.get_upcoming_tasks(user_id, days=1)
     overdue = await db.get_overdue_tasks(user_id)
-
-    # Прогноз погоды — молча пропускаем если ключ/координаты не заданы
-    weather_client = app.bot_data.get("weather")
-    if weather_client and weather_client.enabled:
-        loc = await db.get_location(tg_id)
-        if loc.get("lat") and loc.get("lon"):
-            w = await weather_client.get_weather(loc["lat"], loc["lon"])
-            if w:
-                city_label = f" в {loc['city']}" if loc.get("city") else ""
-                context += (
-                    f"\n\nПогода{city_label}: {w['condition']}, {w['temp']}°C "
-                    f"(ощущается как {w['feels_like']}°C), ветер {w['wind_speed']} м/с."
-                )
+    settings = await db.get_notification_settings(tg_id)
 
     trigger = "overdue" if overdue else "morning"
     text = ai.generate_motivation(context, trigger=trigger, personality=personality)
+
+    # Погода — фиксированный блок в конце, только если пользователь включил
+    weather_block = None
+    if settings.get("weather"):
+        weather_client = app.bot_data.get("weather")
+        if weather_client and weather_client.enabled:
+            loc = await db.get_location(tg_id)
+            if loc.get("lat") and loc.get("lon"):
+                w = await weather_client.get_weather(loc["lat"], loc["lon"])
+                if w:
+                    weather_block = _format_weather_block(w, loc.get("city"))
+                    log.info("Morning [%d]: weather appended: %s°C", tg_id, w["temp"])
+                else:
+                    log.warning("Morning [%d]: weather API returned None", tg_id)
+            else:
+                log.info("Morning [%d]: weather enabled but no location saved", tg_id)
+
+    if weather_block:
+        text += f"\n\n{weather_block}"
 
     if upcoming:
         task_lines = "\n".join(
@@ -125,9 +168,13 @@ async def _send_morning(app, tg_id, user_id, db, ai, personality) -> None:
         text += f"\n\n📋 <b>Сегодня:</b>\n{task_lines}"
 
     if overdue:
+        shown = overdue[:5]
+        rest = len(overdue) - len(shown)
         overdue_lines = "\n".join(
-            f"  ⚠️ {t['title']} (просрочено {t['due_date']})" for t in overdue
+            f"  ⚠️ {t['title']} (просрочено {t['due_date']})" for t in shown
         )
+        if rest:
+            overdue_lines += f"\n  <i>…и ещё {rest} задач</i>"
         text += f"\n\n<b>Просроченные задачи:</b>\n{overdue_lines}"
 
     await app.bot.send_message(tg_id, text, parse_mode="HTML")

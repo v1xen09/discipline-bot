@@ -48,6 +48,12 @@ class Config:
 
     BOT_NAME: str = field(default_factory=lambda: os.getenv("BOT_NAME", "TManager"))
 
+    # ── Администратор ─────────────────────────────────────────────────────────
+    # Telegram ID владельца — открывает /admin (узнать: @userinfobot). 0 = отключено.
+    ADMIN_TELEGRAM_ID: int = field(
+        default_factory=lambda: int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
+    )
+
     def validate(self) -> None:
         if not self.TELEGRAM_TOKEN:
             raise ValueError("TELEGRAM_TOKEN is not set")

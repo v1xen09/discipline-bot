@@ -328,24 +328,35 @@ class AIClient:
 
     # ── Schedule generation ────────────────────────────────────────────────────
 
-    def generate_schedule(self, user_request: str, context: str = "") -> dict:
+    def generate_schedule(
+        self, user_request: str, context: str = "", target_monday: "date | None" = None
+    ) -> dict:
         """
         Generate a structured weekly schedule based on user's description.
-        Returns a dict: {weekday_name: [{time, task, description}]}
+        Returns a dict: {weekday_name: [{time, task, description}], target_week_start: str|None}
+
+        target_monday — явно указать понедельник целевой недели.
+        Если None — текущая неделя.
         """
         today = date.today()
-        monday = today - timedelta(days=today.weekday())
+        monday = target_monday or (today - timedelta(days=today.weekday()))
+        sunday = monday + timedelta(days=6)
         today_ru = WEEKDAYS_RU[today.weekday()]
+        is_future_week = monday > today
 
         context_block = f"\n\nКонтекст пользователя:\n{context}" if context else ""
+
+        past_note = (
+            "Прошедшие дни этой недели не планируй — оставь их пустыми массивами.\n"
+            if not is_future_week else ""
+        )
 
         prompt = f"""Пользователь просит составить расписание на неделю.
 Запрос: «{user_request}»{context_block}
 
 Сегодня — {today_ru}, {today.strftime('%d.%m.%Y')}.
-Неделя с {monday.strftime('%d.%m.%Y')} (пн) по {(monday + timedelta(days=6)).strftime('%d.%m.%Y')} (вс).
-Прошедшие дни недели не планируй — оставь их пустыми массивами.
-
+Планируемая неделя: с {monday.strftime('%d.%m.%Y')} (пн) по {sunday.strftime('%d.%m.%Y')} (вс).
+{past_note}
 КРИТИЧНО — НЕ выдумывай задачи:
 - В план попадает ТОЛЬКО то, что пользователь явно описал в запросе.
 - Если запрос короткий — расписание тоже короткое. Это нормально.
@@ -365,6 +376,7 @@ class AIClient:
 
 Верни расписание СТРОГО в виде JSON (без markdown, без пояснений):
 {{
+  "target_week_start": "YYYY-MM-DD или null",
   "monday":    [{{"time": "09:00", "task": "Название", "description": "детали"}}],
   "tuesday":   [...],
   "wednesday": [...],
@@ -373,6 +385,10 @@ class AIClient:
   "saturday":  [...],
   "sunday":    [...]
 }}
+
+target_week_start: если пользователь указал конкретную дату начала недели или
+конкретный месяц/число — верни понедельник той недели в формате YYYY-MM-DD.
+Иначе null (бот сам знает, какая неделя выбрана).
 
 Правила:
 - Каждый день 3–6 задач, реалистично распределённых по времени.
@@ -395,18 +411,14 @@ class AIClient:
     # ── Motivation ─────────────────────────────────────────────────────────────
 
     def generate_motivation(
-        self, context: str, trigger: str = "morning", personality: str = "soft"
+        self, context: str, trigger: str = "morning", personality: str = "soft",
     ) -> str:
         """
         Generate a motivational message using the user's diary/task context.
         trigger: 'morning' | 'evening' | 'streak_broken' | 'streak_milestone' | 'overdue'
         """
         trigger_hints = {
-            "morning": (
-                "Это утреннее приветствие. Зарядь на день, напомни о предстоящих задачах. "
-                "Если в контексте есть данные о погоде — упомяни их и дай краткий совет "
-                "по одежде (1 предложение, без пустых клише)."
-            ),
+            "morning": "Это утреннее приветствие. Зарядь на день, напомни о предстоящих задачах.",
             "evening": "Это вечерний итог дня. Подведи итоги, отметь достижения, подготовь к завтрашнему.",
             "overdue": "У пользователя есть просроченные задачи. Мягко, но прямо скажи об этом и предложи начать прямо сейчас.",
             "reminder": (
@@ -491,6 +503,11 @@ class AIClient:
                 lines.append(f"{speaker}: {h.get('content', '')}")
             history_block = "\n\nНедавняя переписка:\n" + "\n".join(lines)
 
+        _today = date.today()
+        today_iso = _today.isoformat()
+        tomorrow_iso = (_today + timedelta(days=1)).isoformat()
+        day_after_iso = (_today + timedelta(days=2)).isoformat()
+
         prompt = f"""Сообщение пользователя:
 «{message}»{history_block}
 
@@ -503,14 +520,17 @@ class AIClient:
   "intent": "add_tasks" | "done_tasks" | "delete_tasks" | "schedule" | "modify_schedule" | "add_note" | "delete_note" | "set_priority" | "set_reminder" | "set_task_time" | "motivation" | "chat",
   "tasks": [{{"title": "...", "due_date": "YYYY-MM-DD или null", "time": "HH:MM или null", "recurring": "daily|weekly|null", "priority": "high|medium|low|null"}}],
   "done_task_ids": [12, 15],
+  "done_task_titles": ["Зарядка"],
   "delete_task_ids": [7],
+  "delete_task_titles": ["Зал"],
   "note_text": "текст заметки или null",
   "delete_note_ids": [3, 7],
   "schedule_request": "текст запроса на расписание или null",
+  "schedule_week_offset": 0,
   "schedule_changes": [
-    {{"op": "add",    "day": "monday|tuesday|...|sunday", "time": "HH:MM", "task": "...", "description": "..."}},
-    {{"op": "remove", "day": "monday", "task": "Алгебра"}},
-    {{"op": "move",   "from_day": "friday", "to_day": "thursday", "task": "Зарядка", "new_time": "08:00"}}
+    {{"op": "add",    "date": "YYYY-MM-DD", "time": "HH:MM", "task": "...", "description": "..."}},
+    {{"op": "remove", "date": "YYYY-MM-DD", "task": "Алгебра"}},
+    {{"op": "move",   "from_date": "YYYY-MM-DD", "to_date": "YYYY-MM-DD", "task": "Зарядка", "new_time": "08:00"}}
   ],
   "priority_changes": [{{"task_id": 5, "priority": "high|medium|low|null"}}],
   "reminder_changes": [{{"task_id": 5, "minutes": 30}}],
@@ -524,10 +544,14 @@ class AIClient:
   которые надо добавить. Если он указал день/время («завтра», «в пятницу
   в 14:00», «сегодня вечером») — это всё равно add_tasks, просто заполняй
   поля due_date и time. НЕ пытайся «составить план дня» из одной задачи.
+  due_date — СТРОГО формат YYYY-MM-DD или null. НИКОГДА не пиши слова
+  «сегодня», «завтра» и т.п. — только конкретную дату, опираясь на дату
+  из контекста. Сегодня={today_iso}, завтра={tomorrow_iso}, послезавтра={day_after_iso}.
+  «в [день недели]» — ближайшее будущее вхождение этого дня.
   Примеры:
     • «надо купить хлеб» → add_tasks, due_date=null, time=null
-    • «запланируй сегодня купить хлеб» → add_tasks, due_date=сегодня, time=null
-    • «добавь на завтра в 15:00 встречу с врачом» → add_tasks, due_date=завтра, time=15:00
+    • «запланируй сегодня купить хлеб» → add_tasks, due_date={today_iso}, time=null
+    • «добавь на завтра в 15:00 встречу с врачом» → add_tasks, due_date={tomorrow_iso}, time=15:00
     • «надо сделать зарядку и купить хлеб» → add_tasks с двумя элементами
 
 - schedule: пользователь ЯВНО просит составить план/расписание на несколько
@@ -589,18 +613,26 @@ class AIClient:
 - Если пользователь не упоминал приоритет — оставляй null.
 
 КРИТИЧНО для done_tasks / delete_tasks:
-- Используй СПИСОК «Активные задачи (с ID)» из контекста — у каждой задачи
-  указан id в формате [id=N].
-- В done_task_ids и delete_task_ids клади РОВНО эти числа.
-- Сопоставление по СМЫСЛУ: «удали покупки» матчится на «Купить хлеб» (id=12).
-- Если задачи нет — оставь массив пустым и в reply честно скажи об этом.
+- ВСЕГДА заполняй done_task_titles / delete_task_titles точным названием задачи
+  как написал пользователь («удали Зал» → delete_task_titles: ["Зал"]).
+  Бот найдёт задачу по этому тексту — это надёжнее числовых ID.
+- done_task_ids / delete_task_ids оставляй пустыми — они не используются когда
+  есть titles.
+- Сопоставление по СМЫСЛУ: «удали покупки» → delete_task_titles: ["Купить хлеб"].
+- В поле reply НЕ пиши «удалил» / «отметил» — бот сформирует подтверждение
+  сам после реальной операции. Пиши только вводную реакцию.
+
+schedule_week_offset: 0 = эта неделя (по умолчанию), 1 = следующая.
+Ставь 1 если пользователь написал «следующая неделя», «на той неделе» и т.п.
 
 КРИТИЧНО для modify_schedule:
-- day, from_day, to_day — на английском в нижнем регистре: monday/tuesday/
-  wednesday/thursday/friday/saturday/sunday.
-- op = "add"     требует поля: day, time, task; description опционально.
-- op = "remove"  требует поля: day, task (название как оно в плане).
-- op = "move"    требует поля: from_day, to_day, task; new_time опционально.
+- date, from_date, to_date — КОНКРЕТНАЯ ДАТА в формате YYYY-MM-DD.
+  Используй реальную календарную дату, НИКОГДА не название дня недели.
+  Сегодняшняя дата и день недели указаны в начале контекста — считай от них.
+  Пример: если сегодня воскресенье 10.05, «завтра» = 2026-05-11, «следующий пн» = 2026-05-11.
+- op = "add"     требует поля: date, task; time и description опциональны.
+- op = "remove"  требует поля: date, task (название как оно в плане).
+- op = "move"    требует поля: from_date, to_date, task; new_time опционально.
 - Можно вернуть НЕСКОЛЬКО изменений за один запрос, если пользователь
   попросил несколько правок сразу.
 
@@ -634,6 +666,7 @@ class AIClient:
         parsed.setdefault("note_text", None)
         parsed.setdefault("delete_note_ids", [])
         parsed.setdefault("schedule_request", None)
+        parsed.setdefault("schedule_week_offset", 0)
         parsed.setdefault("schedule_changes", [])
         parsed.setdefault("priority_changes", [])
         parsed.setdefault("reminder_changes", [])

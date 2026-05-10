@@ -29,7 +29,25 @@ from database import Database
 
 log = logging.getLogger(__name__)
 
+AWAITING_SCHEDULE_WEEK = 0
 AWAITING_SCHEDULE_REQUEST = 1
+
+
+def _monday_for_offset(offset: int) -> date:
+    today = date.today()
+    return today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
+
+
+def _viewed_monday(ctx) -> date:
+    """Возвращает просматриваемую неделю из user_data или текущую."""
+    iso = ctx.user_data.get("myplan_week_monday")
+    if iso:
+        try:
+            return date.fromisoformat(iso)
+        except ValueError:
+            pass
+    today = date.today()
+    return today - timedelta(days=today.weekday())
 
 DAY_NAMES = {
     "monday": "Понедельник",
@@ -50,12 +68,50 @@ DAY_SHORT = {
 # ── /schedule — генерация плана ──────────────────────────────────────────────
 
 async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "📅 Расскажи, что нужно запланировать на эту неделю.\n\n"
-        "Например: «Нужно учиться по 2 часа в день, ходить в зал вт/чт/сб, "
-        "закончить рабочий проект к пятнице и не забыть про личное время»"
+    m0 = _monday_for_offset(0)
+    m1 = _monday_for_offset(1)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"📅 Эта неделя ({m0.strftime('%d.%m')}–{(m0 + timedelta(days=6)).strftime('%d.%m')})",
+            callback_data="schedule_week_select:0",
+        )],
+        [InlineKeyboardButton(
+            f"📅 Следующая неделя ({m1.strftime('%d.%m')}–{(m1 + timedelta(days=6)).strftime('%d.%m')})",
+            callback_data="schedule_week_select:1",
+        )],
+    ])
+    await update.message.reply_html(
+        "📅 На какую неделю составить расписание?",
+        reply_markup=keyboard,
+    )
+    return AWAITING_SCHEDULE_WEEK
+
+
+async def schedule_week_selected(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    offset = int(query.data.split(":")[1])
+    ctx.user_data["schedule_week_offset"] = offset
+    monday = _monday_for_offset(offset)
+    label = "эту" if offset == 0 else "следующую"
+    await query.edit_message_text(
+        f"📅 Расскажи, что нужно запланировать на {label} неделю "
+        f"({monday.strftime('%d.%m')}–{(monday + timedelta(days=6)).strftime('%d.%m')}).\n\n"
+        "Например: «Нужно учиться по 2 часа в день, ходить в зал вт/чт/сб»"
     )
     return AWAITING_SCHEDULE_REQUEST
+
+
+def _resolve_target_monday(schedule: dict, fallback: date) -> date:
+    """Определяет итоговый Monday из ответа AI или fallback."""
+    raw_date = schedule.get("target_week_start")
+    if raw_date:
+        try:
+            d = date.fromisoformat(raw_date)
+            return d - timedelta(days=d.weekday())  # нормализуем к понедельнику
+        except ValueError:
+            pass
+    return fallback
 
 
 async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -66,8 +122,11 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
     db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
     context = await db.get_user_summary_context(user.id)
 
+    offset = ctx.user_data.pop("schedule_week_offset", 0)
+    target_monday = _monday_for_offset(offset)
+
     await update.message.reply_text("⏳ Составляю расписание…")
-    schedule = ai.generate_schedule(update.message.text, context=context)
+    schedule = ai.generate_schedule(update.message.text, context=context, target_monday=target_monday)
 
     if "raw" in schedule:
         await update.message.reply_text(
@@ -75,10 +134,9 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    monday = date.today() - timedelta(days=date.today().weekday())
+    # AI мог вернуть конкретную дату (произвольная неделя)
+    target_monday = _resolve_target_monday(schedule, target_monday)
 
-    # Превращаем JSON {day_key: [items]} в плоский список и заменяем
-    # «плановые» задачи недели одной транзакцией.
     items: list[dict] = []
     for day_key in DAY_KEYS:
         for it in schedule.get(day_key, []) or []:
@@ -96,15 +154,17 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday, items)
+    deleted, added = await db.replace_week_schedule_tasks(db_user["id"], target_monday, items)
     ctx.user_data["last_schedule_request"] = update.message.text
+    ctx.user_data["last_schedule_monday"] = target_monday.isoformat()
 
+    week_label = f"{target_monday.strftime('%d.%m')}–{(target_monday + timedelta(days=6)).strftime('%d.%m')}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📅 Открыть по дням", callback_data=f"schedule_day:{_today_key()}")],
         [InlineKeyboardButton("🔁 Перегенерировать", callback_data="schedule_regenerate")],
     ])
     await update.message.reply_html(
-        f"📅 <b>План на неделю обновлён.</b>\n"
+        f"📅 <b>План на неделю обновлён</b> ({week_label}).\n"
         f"Добавлено задач: <b>{added}</b>"
         + (f"\nЗаменено старых плановых: <b>{deleted}</b>" if deleted else "")
         + "\n\nОткрой /myplan, чтобы увидеть их по дням.",
@@ -128,6 +188,7 @@ async def myplan_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         update.effective_user.full_name,
     )
     monday = date.today() - timedelta(days=date.today().weekday())
+    ctx.user_data["myplan_week_monday"] = monday.isoformat()
     grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
     await _render_week_plan(grouped, monday, update=update, day_key=_today_key())
 
@@ -144,10 +205,36 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     data = query.data
 
+    # ── Подтверждение замены расписания (из чат-интента) ─────────────────
+    if data.startswith("schedule_confirm:"):
+        action = data.split(":", 1)[1]
+        pending = ctx.user_data.pop("pending_schedule", None)
+
+        if action == "no" or not pending:
+            await query.edit_message_text("❌ Расписание не изменено.")
+            return
+
+        items = pending["items"]
+        monday_date = date.fromisoformat(pending["monday"])
+        deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday_date, items)
+        ctx.user_data["last_schedule_change"] = "regenerate"
+
+        await query.edit_message_text(
+            f"📅 <b>План на неделю обновлён.</b>\nДобавлено задач: <b>{added}</b>"
+            + (f"\nЗаменено старых: <b>{deleted}</b>" if deleted else "")
+            + "\n\nОткрой /myplan, чтобы увидеть их по дням.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📅 Открыть по дням", callback_data=f"schedule_day:{_today_key()}")],
+                [InlineKeyboardButton("↩ Отменить изменения", callback_data="schedule_undo")],
+            ]),
+        )
+        return
+
     # ── Откат последнего «большого» изменения расписания ─────────────────
     if data == "schedule_undo":
-        monday_date = date.today() - timedelta(days=date.today().weekday())
-        monday_iso = monday_date.isoformat()
+        monday_iso = ctx.user_data.get("last_schedule_monday") or (date.today() - timedelta(days=date.today().weekday())).isoformat()
+        monday_date = date.fromisoformat(monday_iso)
         restored = await db.restore_schedule_previous(db_user["id"], monday_iso)
         if restored is None:
             await query.answer("Откатывать нечего.", show_alert=True)
@@ -179,8 +266,10 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("⏳ Перегенерирую…")
 
         context = await db.get_user_summary_context(user.id)
-        schedule = ai.generate_schedule(request, context=context)
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday_iso = ctx.user_data.get("last_schedule_monday")
+        monday = date.fromisoformat(monday_iso) if monday_iso else _monday_for_offset(0)
+        schedule = ai.generate_schedule(request, context=context, target_monday=monday)
+        monday = _resolve_target_monday(schedule, monday)
 
         items: list[dict] = []
         for day_key in DAY_KEYS:
@@ -195,16 +284,32 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 })
 
         deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday, items)
+        ctx.user_data["last_schedule_monday"] = monday.isoformat()
+        week_label = f"{monday.strftime('%d.%m')}–{(monday + timedelta(days=6)).strftime('%d.%m')}"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📅 Открыть по дням", callback_data=f"schedule_day:{_today_key()}")],
             [InlineKeyboardButton("🔁 Перегенерировать", callback_data="schedule_regenerate")],
         ])
         await query.message.reply_html(
-            f"📅 <b>План на неделю обновлён.</b>\n"
+            f"📅 <b>План на неделю обновлён</b> ({week_label}).\n"
             f"Добавлено задач: <b>{added}</b>"
             + (f"\nЗаменено старых плановых: <b>{deleted}</b>" if deleted else ""),
             reply_markup=keyboard,
         )
+        return
+
+    # ── Переключение недели в /myplan ────────────────────────────────────
+    if data.startswith("myplan:week:"):
+        monday_iso = data[len("myplan:week:"):]
+        try:
+            monday = date.fromisoformat(monday_iso)
+        except ValueError:
+            return
+        ctx.user_data["myplan_week_monday"] = monday_iso
+        grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
+        current_monday = date.today() - timedelta(days=date.today().weekday())
+        day_key = _today_key() if monday == current_monday else "monday"
+        await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         return
 
     # ── Переключение дня в /myplan ───────────────────────────────────────
@@ -212,7 +317,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         day_key = data.split(":", 1)[1]
         if day_key not in DAY_NAMES:
             return
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         return
@@ -250,7 +355,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         day_key = parts[3] if len(parts) > 3 else _today_key()
         if day_key not in DAY_NAMES:
             return
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         return
@@ -303,7 +408,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         label = _MYPLAN_REMIND_LABELS.get(minutes, "отключено" if minutes == 0 else f"{minutes} мин")
         await query.answer(f"🔔 {label} ✓", show_alert=False)
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         return
@@ -322,7 +427,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await query.answer("Уже выполнено.", show_alert=True)
             return
 
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
 
         # Инжектируем выполненную задачу обратно с флагом _done для отображения
@@ -358,7 +463,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await query.answer("Задача не найдена.", show_alert=True)
             return
 
-        monday = date.today() - timedelta(days=date.today().weekday())
+        monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         await query.answer(f"🗑 {deleted['title']}")
@@ -415,13 +520,10 @@ def _format_day_from_tasks(grouped: dict, day_key: str, monday: date) -> str:
       ➕ — доп. задача (добавлена пользователем поверх плана, from_schedule=0)
       ⏰ — время указано
     """
-    today_key = _today_key()
-    is_today = day_key == today_key
-    marker_today = " <i>(сегодня)</i>" if is_today else ""
-
     # Дата дня для шапки
     day_idx = DAY_KEYS.index(day_key)
     day_date = monday + timedelta(days=day_idx)
+    marker_today = " <i>(сегодня)</i>" if day_date == date.today() else ""
     title = (
         f"📅 <b>{DAY_NAMES[day_key]}</b>{marker_today}  "
         f"<i>{day_date.strftime('%d.%m')}</i>"
@@ -544,8 +646,8 @@ _MYPLAN_REMIND_LABELS = {
 }
 
 
-def _week_plan_keyboard(grouped: dict, day_key: str) -> InlineKeyboardMarkup:
-    """Кнопки для дня: ✅/{i} | …/{i} на каждую задачу + переключатель Пн..Вс."""
+def _week_plan_keyboard(grouped: dict, day_key: str, monday: date) -> InlineKeyboardMarkup:
+    """Кнопки для дня: ✅/{i} | …/{i} на каждую задачу + переключатель Пн..Вс + навигация недель."""
     items = list(grouped.get(day_key, []) or [])
     undated = list(grouped.get("undated", []) or [])
     all_items = items + undated
@@ -559,19 +661,34 @@ def _week_plan_keyboard(grouped: dict, day_key: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"… {i}", callback_data=f"myplan:menu:{t['id']}:{day_key}"),
         ])
 
-    today_key = _today_key()
+    today = date.today()
     nav1: list[InlineKeyboardButton] = []
     nav2: list[InlineKeyboardButton] = []
     for i, key in enumerate(DAY_KEYS):
         label = DAY_SHORT[key]
+        key_date = monday + timedelta(days=i)
         if key == day_key:
             label = f"·{label}·"
-        elif key == today_key:
+        elif key_date == today:
             label = f"•{label}"
         btn = InlineKeyboardButton(label, callback_data=f"schedule_day:{key}")
         (nav1 if i < 4 else nav2).append(btn)
     rows.append(nav1)
     rows.append(nav2)
+
+    # Навигация по неделям: предыдущая / текущий диапазон / следующая
+    prev_m = monday - timedelta(weeks=1)
+    next_m = monday + timedelta(weeks=1)
+    current_monday = date.today() - timedelta(days=date.today().weekday())
+    mid_label = monday.strftime('%d.%m') + "–" + (monday + timedelta(days=6)).strftime('%d.%m')
+    if monday == current_monday:
+        mid_label = f"·{mid_label}·"
+    rows.append([
+        InlineKeyboardButton(f"◀ {prev_m.strftime('%d.%m')}", callback_data=f"myplan:week:{prev_m.isoformat()}"),
+        InlineKeyboardButton(mid_label, callback_data=f"myplan:week:{current_monday.isoformat()}"),
+        InlineKeyboardButton(f"{next_m.strftime('%d.%m')} ▶", callback_data=f"myplan:week:{next_m.isoformat()}"),
+    ])
+
     rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
 
     return InlineKeyboardMarkup(rows)
@@ -643,7 +760,7 @@ async def _render_week_plan(
     if day_key is None:
         day_key = _today_key()
     text = _format_day_from_tasks(grouped, day_key, monday)
-    keyboard = _week_plan_keyboard(grouped, day_key)
+    keyboard = _week_plan_keyboard(grouped, day_key, monday)
     if target_message is not None:
         await target_message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     else:

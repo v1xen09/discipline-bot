@@ -33,11 +33,13 @@ from config import Config
 from database import Database
 from handlers.ai_chat_handler import handle_text_message
 from handlers.schedule_handler import (
+    AWAITING_SCHEDULE_WEEK,
     AWAITING_SCHEDULE_REQUEST,
     handle_schedule_callback,
     myplan_command,
     receive_schedule_request,
     schedule_command,
+    schedule_week_selected,
 )
 from handlers.analytics_handler import month_command, today_command, week_command
 from handlers.notes_handler import handle_notes_callback, note_command, notes_command
@@ -51,8 +53,10 @@ from handlers.task_handler import (
     task_command,
     tasks_command,
 )
+from handlers.admin_handler import admin_command, handle_admin_callback
 from handlers.location_handler import handle_location
 from handlers.menu_handler import handle_menu_callback, menu_command
+from handlers.weather_handler import weather_command
 from handlers.voice_message_handler import handle_voice
 from scheduler_jobs import setup_scheduler
 from voice_handler import WhisperVoiceHandler
@@ -88,6 +92,7 @@ async def _post_init(app: Application) -> None:
         BotCommand("today",    "Статистика продуктивности за сегодня"),
         BotCommand("week",     "Статистика за текущую неделю"),
         BotCommand("month",    "Статистика за текущий месяц"),
+        BotCommand("weather",  "Текущая погода"),
         BotCommand("settings", "Настройки"),
     ])
 
@@ -146,6 +151,24 @@ async def _error_handler(update: object, ctx) -> None:
         log.warning("Failed to notify user about error: %s", e)
 
 
+def _with_user_lock(handler):
+    """Гарантирует, что один пользователь не может запустить handler дважды одновременно."""
+    async def wrapper(update: Update, ctx):
+        user_id = update.effective_user.id
+        active: set = ctx.bot_data.setdefault("active_users", set())
+        if user_id in active:
+            await update.effective_message.reply_text(
+                "⏳ Подожди — я ещё обрабатываю твоё предыдущее сообщение."
+            )
+            return
+        active.add(user_id)
+        try:
+            await handler(update, ctx)
+        finally:
+            active.discard(user_id)
+    return wrapper
+
+
 def main() -> None:
     # Python 3.14: asyncio.get_event_loop() больше не создаёт loop сам, если
     # в потоке его нет — теперь он бросает RuntimeError. python-telegram-bot
@@ -193,6 +216,9 @@ def main() -> None:
     schedule_conv = ConversationHandler(
         entry_points=[CommandHandler("schedule", schedule_command)],
         states={
+            AWAITING_SCHEDULE_WEEK: [
+                CallbackQueryHandler(schedule_week_selected, pattern=r"^schedule_week_select:"),
+            ],
             AWAITING_SCHEDULE_REQUEST: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_schedule_request)
             ],
@@ -202,6 +228,7 @@ def main() -> None:
     )
 
     # ── Command handlers ───────────────────────────────────────────────────────
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
@@ -214,17 +241,19 @@ def main() -> None:
     app.add_handler(CommandHandler("month", month_command))
     app.add_handler(CommandHandler("myplan", myplan_command))
     app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("note", note_command))
     app.add_handler(CommandHandler("notes", notes_command))
     app.add_handler(CommandHandler("pomodoro", pomodoro_command))
     app.add_handler(schedule_conv)
 
     # ── Voice messages & location ──────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.VOICE, _with_user_lock(handle_voice)))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
     # ── Inline keyboard callbacks ──────────────────────────────────────────────
     # menu: ПЕРВЫМ — до tasks?:, т.к. menu:* не попадает под tasks?:, но для надёжности
+    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_schedule_callback, pattern=r"^(schedule_|myplan:)"))
     # task:done|delete:<id>[:<page>] — действия по задаче (одиночная карточка или из списка)
@@ -238,7 +267,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_pomodoro_callback, pattern=r"^pomodoro:"))
 
     # ── Free-form text (AI chat) ───────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _with_user_lock(handle_text_message)))
 
     # ── Global error handler ──────────────────────────────────────────────────
     app.add_error_handler(_error_handler)

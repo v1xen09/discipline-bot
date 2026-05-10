@@ -20,6 +20,7 @@ callback_data:
 """
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from ai_client import PERSONALITY_LABELS
@@ -84,10 +85,12 @@ def _notif_keyboard(settings: dict) -> InlineKeyboardMarkup:
     evening = _fix_time(settings["evening"]) or "выкл"
     rem = settings["reminders"]
     rem_label = ", ".join(rem.split(",")) if rem else "выкл"
+    weather_label = "✅ Включена" if settings.get("weather") else "Выключена"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🌅 Утро: {morning}  ✏️", callback_data="settings:notif_pick_morning")],
         [InlineKeyboardButton(f"🌙 Вечер: {evening}  ✏️", callback_data="settings:notif_pick_evening")],
         [InlineKeyboardButton(f"🔔 Напоминания: {rem_label}  ✏️", callback_data="settings:notif_reminders_open")],
+        [InlineKeyboardButton(f"🌤 Погода в утреннем: {weather_label}", callback_data="settings:notif_weather")],
         [InlineKeyboardButton("← Назад", callback_data="settings:open")],
     ])
 
@@ -138,6 +141,13 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     action = parts[1]
 
+    async def safe_edit(text, **kwargs):
+        try:
+            await query.edit_message_text(text, **kwargs)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
     # Сбрасываем флаги ожидания ввода, если пользователь ушёл из раздела
     if action != "set_city":
         ctx.user_data.pop("awaiting_city", None)
@@ -145,7 +155,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     if action == "open":
         text, keyboard = await _render_settings(db, user.id)
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await safe_edit(text, parse_mode="HTML", reply_markup=keyboard)
         return
 
     if action == "noop":
@@ -158,7 +168,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await db.set_personality(user.id, key)
         text, keyboard = await _render_settings(db, user.id)
         label = PERSONALITY_LABELS[key]
-        await query.edit_message_text(
+        await safe_edit(
             f"Готово, переключился в характер {label}.\n\n" + text,
             parse_mode="HTML",
             reply_markup=keyboard,
@@ -174,13 +184,13 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             "Выбери время утреннего/вечернего сообщения или настрой авто-напоминания.\n"
             "«Выкл» отключает соответствующий тип."
         )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
+        await safe_edit(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
         return
 
     if action == "notif_pick_morning":
         settings = await db.get_notification_settings(user.id)
         kb = _time_picker_keyboard("morning", _TIME_PRESETS_MORNING, current=_fix_time(settings["morning"]))
-        await query.edit_message_text(
+        await safe_edit(
             "🌅 <b>Утреннее сообщение</b>\n\n"
             "Бот пришлёт сводку задач и мотивацию в выбранное время.",
             parse_mode="HTML", reply_markup=kb,
@@ -190,7 +200,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if action == "notif_pick_evening":
         settings = await db.get_notification_settings(user.id)
         kb = _time_picker_keyboard("evening", _TIME_PRESETS_EVENING, current=_fix_time(settings["evening"]))
-        await query.edit_message_text(
+        await safe_edit(
             "🌙 <b>Вечернее сообщение</b>\n\n"
             "Бот подведёт итоги дня в выбранное время.",
             parse_mode="HTML", reply_markup=kb,
@@ -208,7 +218,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             "🔔 <b>Уведомления</b>\n\n"
             f"✅ Утреннее время: <b>{new_val or 'выключено'}</b>"
         )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
+        await safe_edit(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
         return
 
     if action == "notif_evening" and len(parts) >= 3:
@@ -221,12 +231,25 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             "🔔 <b>Уведомления</b>\n\n"
             f"✅ Вечернее время: <b>{new_val or 'выключено'}</b>"
         )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
+        await safe_edit(text, parse_mode="HTML", reply_markup=_notif_keyboard(settings))
+        return
+
+    if action == "notif_weather":
+        settings = await db.get_notification_settings(user.id)
+        new_val = not settings.get("weather", False)
+        await db.set_weather_notification(user.id, new_val)
+        settings["weather"] = new_val
+        status = "включена ✅" if new_val else "выключена"
+        await safe_edit(
+            f"🔔 <b>Уведомления</b>\n\n🌤 Погода в утреннем: <b>{status}</b>",
+            parse_mode="HTML",
+            reply_markup=_notif_keyboard(settings),
+        )
         return
 
     if action == "notif_reminders_open":
         settings = await db.get_notification_settings(user.id)
-        await query.edit_message_text(
+        await safe_edit(
             "🔔 <b>Напоминания о задачах</b>\n\n"
             "Бот будет напоминать о невыполненных задачах в выбранное время.\n"
             "Выбери подходящий вариант:",
@@ -241,7 +264,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         settings = await db.get_notification_settings(user.id)
         await db.set_notification_settings(user.id, settings["morning"], settings["evening"], new_val)
         settings["reminders"] = new_val
-        await query.edit_message_text(
+        await safe_edit(
             "🔔 <b>Напоминания о задачах</b>\n\n"
             f"✅ Сохранено: <b>{new_val or 'выключено'}</b>",
             parse_mode="HTML",
@@ -255,7 +278,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         db2: Database = ctx.bot_data["db"]
         loc = await db2.get_location(user.id)
         current_city = loc.get("city") or "не задан"
-        await query.edit_message_text(
+        await safe_edit(
             f"🌍 <b>Город для прогноза погоды</b>\n\n"
             f"Сейчас: <b>{current_city}</b>\n\n"
             "Напиши название города (<i>например, Москва</i>) "
@@ -275,7 +298,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("⚠️ Да, удалить ВСЁ моё", callback_data="settings:wipe:confirm")],
             [InlineKeyboardButton("← Отмена", callback_data="settings:open")],
         ])
-        await query.edit_message_text(
+        await safe_edit(
             "Подтверди удаление:\n\n"
             "• задачи (активные и выполненные)\n"
             "• серии и история выполнений\n"
@@ -293,7 +316,7 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         ctx.user_data.pop("last_schedule_request", None)
 
         if not counts:
-            await query.edit_message_text("Не нашёл твоих данных — кажется, и удалять нечего.")
+            await safe_edit("Не нашёл твоих данных — кажется, и удалять нечего.")
             return
 
         report_lines = ["✅ <b>История очищена.</b>", ""]
@@ -311,5 +334,5 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if len(report_lines) == 2:
             report_lines.append("• …у тебя и так не было сохранённых данных.")
 
-        await query.edit_message_text("\n".join(report_lines), parse_mode="HTML")
+        await safe_edit("\n".join(report_lines), parse_mode="HTML")
         return

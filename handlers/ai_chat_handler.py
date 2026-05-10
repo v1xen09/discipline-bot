@@ -70,6 +70,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     history = ctx.user_data.get("chat_history", [])
 
     text = update.message.text
+    processing_msg = await update.message.reply_text("⏳ Обрабатываю…")
     result = ai.process_user_intent(
         text, context=context, history=history, personality=personality
     )
@@ -82,7 +83,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         added = []
         for task_data in result["tasks"]:
             title = task_data.get("title", "Задача")
-            due_date = task_data.get("due_date")
+            due_date = _normalize_due_date(task_data.get("due_date"))
             time_val = task_data.get("time")
             await db.add_task(
                 db_user["id"],
@@ -113,6 +114,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             op=db.complete_task,
         )
         if completed:
+            reply = ""  # action-подтверждение важнее AI-текста
             # Зеркалим в текущее недельное расписание — пункты с тем же
             # названием получают done=true в /myplan.
             for title in completed:
@@ -126,6 +128,11 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         else:
             log.info("done_tasks intent without effect (ids=%s titles=%s)",
                      result.get("done_task_ids"), result.get("done_task_titles"))
+            searched = result.get("done_task_titles") or []
+            if searched:
+                reply = f"❌ Не нашёл задачу «{searched[0]}» — уточни название или открой /tasks."
+            else:
+                reply = reply or "❌ Не нашёл, что отметить — уточни название."
 
     elif intent == "delete_tasks":
         deleted = await _apply_by_ids_or_titles(
@@ -135,22 +142,38 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             op=db.delete_task,
         )
         if deleted:
+            reply = ""  # action-подтверждение важнее AI-текста
             extra_lines.append(
                 "🗑 Удалено: " + ", ".join(f"«{t}»" for t in deleted)
             )
         else:
             log.info("delete_tasks intent without effect (ids=%s titles=%s)",
                      result.get("delete_task_ids"), result.get("delete_task_titles"))
+            searched = result.get("delete_task_titles") or []
+            if searched:
+                reply = f"❌ Не нашёл задачу «{searched[0]}» — уточни название или открой /tasks."
+            else:
+                reply = reply or "❌ Не нашёл, что удалять — уточни название."
 
     elif intent == "schedule" and result.get("schedule_request"):
         try:
-            schedule = ai.generate_schedule(text, context=context)
+            offset = result.get("schedule_week_offset") or 0
+            _today = date.today()
+            target_monday = _today - timedelta(days=_today.weekday()) + timedelta(weeks=offset)
+            schedule = ai.generate_schedule(text, context=context, target_monday=target_monday)
             if "raw" in schedule:
                 extra_lines.append(
                     "Не получилось разобрать расписание, попробуй уточнить запрос."
                 )
             else:
-                monday = date.today() - timedelta(days=date.today().weekday())
+                # AI может вернуть конкретную дату начала недели (произвольная дата)
+                if schedule.get("target_week_start"):
+                    try:
+                        d = date.fromisoformat(schedule["target_week_start"])
+                        target_monday = d - timedelta(days=d.weekday())
+                    except ValueError:
+                        pass
+
                 # Снимаем плоский список items для replace_week_schedule_tasks
                 items: list[dict] = []
                 DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
@@ -170,15 +193,51 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                         "Расписание получилось пустым — уточни запрос."
                     )
                 else:
-                    deleted, added = await db.replace_week_schedule_tasks(
-                        db_user["id"], monday, items
-                    )
-                    extra_lines.append(
-                        f"📅 План на неделю обновлён · добавлено {added}"
-                        + (f", заменено старых {deleted}" if deleted else "")
-                        + ".\n\nСмотри /myplan."
-                    )
-                    ctx.user_data["last_schedule_change"] = "regenerate"
+                    # Проверяем, есть ли уже задачи на затрагиваемые дни
+                    affected_days = {item["day"] for item in items}
+                    existing = await db.get_week_tasks_grouped(db_user["id"], target_monday)
+                    has_existing = any(existing.get(d) for d in affected_days)
+
+                    if has_existing:
+                        # Сохраняем расписание и просим подтверждения перед заменой
+                        ctx.user_data["pending_schedule"] = {
+                            "items": items,
+                            "monday": target_monday.isoformat(),
+                        }
+                        confirm_text = (reply + "\n\n" if reply else "") + (
+                            "⚠️ У тебя уже есть задачи на эти дни. "
+                            "Заменить их новым расписанием?"
+                        )
+                        await processing_msg.edit_text(
+                            confirm_text,
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton(
+                                    "✅ Да, заменить",
+                                    callback_data="schedule_confirm:yes",
+                                ),
+                                InlineKeyboardButton(
+                                    "❌ Нет, оставить",
+                                    callback_data="schedule_confirm:no",
+                                ),
+                            ]]),
+                        )
+                        return
+                    else:
+                        deleted, added = await db.replace_week_schedule_tasks(
+                            db_user["id"], target_monday, items
+                        )
+                        ctx.user_data["last_schedule_monday"] = target_monday.isoformat()
+                        week_label = (
+                            f"{target_monday.strftime('%d.%m')}–"
+                            f"{(target_monday + timedelta(days=6)).strftime('%d.%m')}"
+                        )
+                        extra_lines.append(
+                            f"📅 План на {week_label} обновлён · добавлено {added}"
+                            + (f", заменено старых {deleted}" if deleted else "")
+                            + ".\n\nСмотри /myplan."
+                        )
+                        ctx.user_data["last_schedule_change"] = "regenerate"
         except Exception as e:
             log.warning("Schedule generation from chat failed: %s", e)
             extra_lines.append("Не получилось составить расписание.")
@@ -287,7 +346,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         history.append({"role": "assistant", "content": reply or final})
         ctx.user_data["chat_history"] = history[-6:]
 
-    await update.message.reply_html(final, reply_markup=reply_markup)
+    await processing_msg.edit_text(final, parse_mode="HTML", reply_markup=reply_markup)
 
     # Раз в 5 сообщений — синтез наблюдения в дневник
     cnt = ctx.user_data.get("interaction_count", 0) + 1
@@ -316,64 +375,61 @@ async def _apply_by_ids_or_titles(
 ) -> list[str]:
     """
     Применяет op(task_id, user_id) к набору задач.
-    Сначала пытается работать по ID (надёжно), если ID нет — по нечёткому
-    совпадению в названии (fallback для случая, когда модель забыла ID).
-    Возвращает список названий реально затронутых задач.
+
+    Titles — основной путь (точное название надёжнее, чем числовой ID от LLM).
+    IDs — запасной путь, используется только когда titles пустой.
     """
     affected: list[str] = []
     seen_ids: set[int] = set()
 
-    # 1) По ID — приоритетный путь
-    for raw in ids:
-        try:
-            tid = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if tid in seen_ids:
-            continue
-        seen_ids.add(tid)
-        applied = await op(tid, user_id)
-        if applied:
-            affected.append(applied["title"])
-
-    # 2) По названию — если модель не отдала ID, пробуем матчить
-    for title in titles:
-        if not title or not title.strip():
-            continue
-        candidates = await db.find_tasks_by_title(user_id, title, limit=1)
-        if not candidates:
-            continue
-        task = candidates[0]
-        if task["id"] in seen_ids:
-            continue
-        seen_ids.add(task["id"])
-        applied = await op(task["id"], user_id)
-        if applied:
-            affected.append(applied["title"])
+    if titles:
+        # Основной путь: ищем по названию — LLM знает имя задачи из сообщения
+        for title in titles:
+            if not title or not title.strip():
+                continue
+            candidates = await db.find_tasks_by_title(user_id, title, limit=1)
+            if not candidates:
+                continue
+            task = candidates[0]
+            if task["id"] in seen_ids:
+                continue
+            seen_ids.add(task["id"])
+            applied = await op(task["id"], user_id)
+            if applied:
+                affected.append(applied["title"])
+    else:
+        # Запасной путь: по ID, только если titles не предоставлены
+        for raw in ids:
+            try:
+                tid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            applied = await op(tid, user_id)
+            if applied:
+                affected.append(applied["title"])
 
     return affected
 
 
-VALID_DAY_KEYS = {
-    "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday",
-}
-DAY_LABELS_RU = {
-    "monday": "пн", "tuesday": "вт", "wednesday": "ср", "thursday": "чт",
-    "friday": "пт", "saturday": "сб", "sunday": "вс",
-}
+_WEEKDAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+_RU_RELATIVE_DAYS = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
 
 
-DAY_INDEX = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-}
-
-
-def _day_to_iso(day_key: str) -> str:
-    """Конкретная дата текущей недели для day_key."""
-    monday = date.today() - timedelta(days=date.today().weekday())
-    return (monday + timedelta(days=DAY_INDEX[day_key])).isoformat()
+def _normalize_due_date(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    s = raw.strip().lower()
+    if s in _RU_RELATIVE_DAYS:
+        return (date.today() + timedelta(days=_RU_RELATIVE_DAYS[s])).isoformat()
+    try:
+        date.fromisoformat(s)
+        return s
+    except ValueError:
+        return None
 
 
 async def _apply_schedule_changes(
@@ -382,10 +438,12 @@ async def _apply_schedule_changes(
     changes: list[dict],
 ) -> tuple[list[str], list[str]]:
     """
-    Точечные правки в текущей неделе НА УРОВНЕ ЗАДАЧ:
-      • add    — создаёт новую задачу на день (from_schedule=0, отметится «доп»)
-      • remove — удаляет задачу по названию (внутри указанного дня)
+    Точечные правки НА УРОВНЕ ЗАДАЧ:
+      • add    — создаёт новую задачу на дату (from_schedule=0, отметится «доп»)
+      • remove — удаляет задачу по названию (внутри указанной даты)
       • move   — переносит задачу: меняет due_date (и time, если задан)
+
+    Поля date/from_date/to_date — конкретные ISO-даты (YYYY-MM-DD).
     """
     applied: list[str] = []
     errors: list[str] = []
@@ -394,13 +452,18 @@ async def _apply_schedule_changes(
         op = (change.get("op") or "").lower()
 
         if op == "add":
-            day = (change.get("day") or "").lower()
-            if day not in DAY_INDEX:
-                errors.append(f"• «{change}» — некорректный день")
+            date_iso = (change.get("date") or "").strip()
+            if not date_iso:
+                errors.append(f"• Add без даты: {change}")
+                continue
+            try:
+                d = date.fromisoformat(date_iso)
+            except ValueError:
+                errors.append(f"• Add: некорректная дата «{date_iso}»")
                 continue
             title = (change.get("task") or "").strip()
             if not title:
-                errors.append(f"• Add без названия: {change}")
+                errors.append(f"• Add без названия")
                 continue
             time_val = (change.get("time") or "").strip() or None
             desc = (change.get("description") or "").strip()
@@ -408,60 +471,68 @@ async def _apply_schedule_changes(
                 user_id,
                 title=title,
                 description=desc,
-                due_date=_day_to_iso(day),
+                due_date=date_iso,
                 time=time_val,
                 source="text",
-                from_schedule=False,  # «доп. задача» — отметим в /myplan значком
+                from_schedule=False,
             )
+            day_label = f"{_WEEKDAY_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
             applied.append(
-                f"➕ {DAY_LABELS_RU[day]}"
+                f"➕ {day_label}"
                 + (f" {time_val}" if time_val else "")
                 + f" — {title}"
             )
 
         elif op == "remove":
-            day = (change.get("day") or "").lower()
-            if day not in DAY_INDEX:
-                errors.append(f"• «{change}» — некорректный день")
+            date_iso = (change.get("date") or "").strip()
+            if not date_iso:
+                errors.append(f"• Remove без даты: {change}")
+                continue
+            try:
+                d = date.fromisoformat(date_iso)
+            except ValueError:
+                errors.append(f"• Remove: некорректная дата «{date_iso}»")
                 continue
             target = (change.get("task") or "").strip()
             if not target:
                 errors.append(f"• Remove без названия")
                 continue
-            day_iso = _day_to_iso(day)
-            # Ищем точное совпадение в этом дне
             tasks = await db.find_tasks_by_title(user_id, target, limit=10)
             removed_title = None
             for t in tasks:
-                if t.get("due_date") == day_iso:
+                if t.get("due_date") == date_iso:
                     deleted = await db.delete_task(t["id"], user_id)
                     if deleted:
                         removed_title = deleted["title"]
                         break
+            day_label = f"{_WEEKDAY_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
             if removed_title:
-                applied.append(f"➖ {DAY_LABELS_RU[day]} — {removed_title}")
+                applied.append(f"➖ {day_label} — {removed_title}")
             else:
-                errors.append(f"• {DAY_LABELS_RU[day]}: не нашёл «{target}»")
+                errors.append(f"• {day_label}: не нашёл «{target}»")
 
         elif op == "move":
-            from_day = (change.get("from_day") or "").lower()
-            to_day = (change.get("to_day") or "").lower()
-            if from_day not in DAY_INDEX or to_day not in DAY_INDEX:
-                errors.append(f"• «{change}» — некорректные дни")
+            from_iso = (change.get("from_date") or "").strip()
+            to_iso = (change.get("to_date") or "").strip()
+            if not from_iso or not to_iso:
+                errors.append(f"• Move без дат: {change}")
+                continue
+            try:
+                from_d = date.fromisoformat(from_iso)
+                to_d = date.fromisoformat(to_iso)
+            except ValueError:
+                errors.append(f"• Move: некорректные даты")
                 continue
             target = (change.get("task") or "").strip()
             if not target:
                 errors.append(f"• Move без названия")
                 continue
-            from_iso = _day_to_iso(from_day)
-            to_iso = _day_to_iso(to_day)
             new_time = (change.get("new_time") or "").strip() or None
 
             tasks = await db.find_tasks_by_title(user_id, target, limit=10)
             moved_title = None
             for t in tasks:
                 if t.get("due_date") == from_iso:
-                    # Обновляем due_date (и time, если задан)
                     import aiosqlite
                     async with aiosqlite.connect(db.path) as conn:
                         if new_time is not None:
@@ -477,15 +548,15 @@ async def _apply_schedule_changes(
                         await conn.commit()
                     moved_title = t["title"]
                     break
+            from_label = f"{_WEEKDAY_SHORT[from_d.weekday()]} {from_d.strftime('%d.%m')}"
+            to_label = f"{_WEEKDAY_SHORT[to_d.weekday()]} {to_d.strftime('%d.%m')}"
             if moved_title:
                 applied.append(
-                    f"⇄ {moved_title}: {DAY_LABELS_RU[from_day]} → {DAY_LABELS_RU[to_day]}"
+                    f"⇄ {moved_title}: {from_label} → {to_label}"
                     + (f" в {new_time}" if new_time else "")
                 )
             else:
-                errors.append(
-                    f"• {DAY_LABELS_RU[from_day]}: не нашёл «{target}» для переноса"
-                )
+                errors.append(f"• {from_label}: не нашёл «{target}» для переноса")
 
         else:
             errors.append(f"• Неизвестная операция: {op!r}")
