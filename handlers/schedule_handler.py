@@ -154,9 +154,36 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    deleted, added = await db.replace_week_schedule_tasks(db_user["id"], target_monday, items)
+    # Проверяем, есть ли уже задачи на затрагиваемые дни
+    affected_days = {it["day"] for it in items}
+    existing = await db.get_week_tasks_grouped(db_user["id"], target_monday)
+    has_existing = any(existing.get(d) for d in affected_days)
+
     ctx.user_data["last_schedule_request"] = update.message.text
     ctx.user_data["last_schedule_monday"] = target_monday.isoformat()
+
+    if has_existing:
+        ctx.user_data["pending_schedule"] = {
+            "items": items,
+            "monday": target_monday.isoformat(),
+            "request": update.message.text,
+        }
+        week_label = f"{target_monday.strftime('%d.%m')}–{(target_monday + timedelta(days=6)).strftime('%d.%m')}"
+        await update.message.reply_html(
+            f"📅 Расписание на <b>{week_label}</b> готово.\n\n"
+            "⚠️ У тебя уже есть задачи на эти дни. "
+            "Что сделать с существующими задачами?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Заменить", callback_data="schedule_confirm:replace"),
+                    InlineKeyboardButton("➕ Добавить", callback_data="schedule_confirm:merge"),
+                ],
+                [InlineKeyboardButton("❌ Отмена", callback_data="schedule_confirm:no")],
+            ]),
+        )
+        return ConversationHandler.END
+
+    deleted, added = await db.replace_week_schedule_tasks(db_user["id"], target_monday, items)
 
     week_label = f"{target_monday.strftime('%d.%m')}–{(target_monday + timedelta(days=6)).strftime('%d.%m')}"
     keyboard = InlineKeyboardMarkup([
@@ -216,8 +243,44 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         items = pending["items"]
         monday_date = date.fromisoformat(pending["monday"])
+
+        if action == "merge":
+            # Добавляем к существующим задачам, ничего не удаляем
+            added = 0
+            for it in items:
+                day_key = (it.get("day") or "").lower()
+                if day_key not in DAY_NAMES:
+                    continue
+                title = (it.get("task") or "").strip()
+                if not title:
+                    continue
+                due = (monday_date + timedelta(days=DAY_KEYS.index(day_key))).isoformat()
+                await db.add_task(
+                    db_user["id"],
+                    title=title,
+                    description=it.get("description") or "",
+                    due_date=due,
+                    time=(it.get("time") or "").strip() or None,
+                    source="schedule",
+                    from_schedule=True,
+                )
+                added += 1
+            ctx.user_data["last_schedule_monday"] = monday_date.isoformat()
+            await query.edit_message_text(
+                f"📅 <b>Добавлено к существующему расписанию.</b>\n"
+                f"Добавлено задач: <b>{added}</b>\n\nОткрой /myplan, чтобы увидеть их по дням.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📅 Открыть по дням", callback_data=f"schedule_day:{_today_key()}")],
+                ]),
+            )
+            return
+
+        # action == "replace" (или устаревший "yes")
         deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday_date, items)
-        ctx.user_data["last_schedule_change"] = "regenerate"
+        ctx.user_data["last_schedule_monday"] = monday_date.isoformat()
+        if pending.get("request"):
+            ctx.user_data["last_schedule_request"] = pending["request"]
 
         await query.edit_message_text(
             f"📅 <b>План на неделю обновлён.</b>\nДобавлено задач: <b>{added}</b>"

@@ -200,6 +200,7 @@ def main() -> None:
         .read_timeout(30.0)
         .write_timeout(30.0)
         .pool_timeout(30.0)
+        .concurrent_updates(True)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()

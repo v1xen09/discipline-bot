@@ -24,6 +24,23 @@ from database import Database
 
 log = logging.getLogger(__name__)
 
+_MAX_TG = 4096
+
+
+async def _send_final(processing_msg, text: str, parse_mode=None, reply_markup=None) -> None:
+    """Отправляет ответ, разбивая на части если длиннее лимита Telegram."""
+    if len(text) <= _MAX_TG:
+        await processing_msg.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+    chunks = [text[i:i + _MAX_TG] for i in range(0, len(text), _MAX_TG)]
+    await processing_msg.edit_text(chunks[0], parse_mode=parse_mode)
+    bot = processing_msg.get_bot()
+    for chunk in chunks[1:-1]:
+        await bot.send_message(processing_msg.chat_id, chunk, parse_mode=parse_mode)
+    await bot.send_message(
+        processing_msg.chat_id, chunks[-1], parse_mode=parse_mode, reply_markup=reply_markup
+    )
+
 
 async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
@@ -85,7 +102,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             title = task_data.get("title", "Задача")
             due_date = _normalize_due_date(task_data.get("due_date"))
             time_val = task_data.get("time")
-            await db.add_task(
+            task_id = await db.add_task(
                 db_user["id"],
                 title=title,
                 due_date=due_date,
@@ -95,11 +112,19 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                 from_schedule=False,
                 priority=task_data.get("priority"),
             )
+            notify_before = task_data.get("notify_before")
+            if notify_before and time_val:
+                try:
+                    await db.set_task_reminder(task_id, db_user["id"], int(notify_before))
+                except Exception:
+                    pass
             ann = title
             if due_date:
                 ann += f" · {due_date}"
                 if time_val:
                     ann += f" {time_val}"
+            if notify_before and time_val:
+                ann += f" 🔔-{notify_before}м"
             added.append(ann)
         if added:
             extra_lines.append(
@@ -156,6 +181,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                 reply = reply or "❌ Не нашёл, что удалять — уточни название."
 
     elif intent == "schedule" and result.get("schedule_request"):
+        reply = ""  # расписание сохраняется в БД, текст LLM не нужен
         try:
             offset = result.get("schedule_week_offset") or 0
             _today = date.today()
@@ -199,45 +225,33 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                     has_existing = any(existing.get(d) for d in affected_days)
 
                     if has_existing:
-                        # Сохраняем расписание и просим подтверждения перед заменой
                         ctx.user_data["pending_schedule"] = {
                             "items": items,
                             "monday": target_monday.isoformat(),
                         }
                         confirm_text = (reply + "\n\n" if reply else "") + (
                             "⚠️ У тебя уже есть задачи на эти дни. "
-                            "Заменить их новым расписанием?"
+                            "Что сделать с существующими задачами?"
                         )
                         await processing_msg.edit_text(
                             confirm_text,
                             parse_mode="HTML",
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton(
-                                    "✅ Да, заменить",
-                                    callback_data="schedule_confirm:yes",
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ Нет, оставить",
-                                    callback_data="schedule_confirm:no",
-                                ),
-                            ]]),
+                            reply_markup=InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton("✅ Заменить", callback_data="schedule_confirm:replace"),
+                                    InlineKeyboardButton("➕ Добавить", callback_data="schedule_confirm:merge"),
+                                ],
+                                [InlineKeyboardButton("❌ Отмена", callback_data="schedule_confirm:no")],
+                            ]),
                         )
                         return
                     else:
-                        deleted, added = await db.replace_week_schedule_tasks(
+                        await db.replace_week_schedule_tasks(
                             db_user["id"], target_monday, items
                         )
                         ctx.user_data["last_schedule_monday"] = target_monday.isoformat()
-                        week_label = (
-                            f"{target_monday.strftime('%d.%m')}–"
-                            f"{(target_monday + timedelta(days=6)).strftime('%d.%m')}"
-                        )
-                        extra_lines.append(
-                            f"📅 План на {week_label} обновлён · добавлено {added}"
-                            + (f", заменено старых {deleted}" if deleted else "")
-                            + ".\n\nСмотри /myplan."
-                        )
                         ctx.user_data["last_schedule_change"] = "regenerate"
+                        extra_lines.append("✅ Расписание на неделю сохранено!\nПосмотреть: /myplan")
         except Exception as e:
             log.warning("Schedule generation from chat failed: %s", e)
             extra_lines.append("Не получилось составить расписание.")
@@ -346,7 +360,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         history.append({"role": "assistant", "content": reply or final})
         ctx.user_data["chat_history"] = history[-6:]
 
-    await processing_msg.edit_text(final, parse_mode="HTML", reply_markup=reply_markup)
+    await _send_final(processing_msg, final, parse_mode="HTML", reply_markup=reply_markup)
 
     # Раз в 5 сообщений — синтез наблюдения в дневник
     cnt = ctx.user_data.get("interaction_count", 0) + 1
