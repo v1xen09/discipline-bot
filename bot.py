@@ -1,20 +1,3 @@
-"""
-TManager — main entry point.
-
-Локальный стек, ничего не уходит в облако:
-  • python-telegram-bot v21  — асинхронный клиент Telegram
-  • LM Studio (через openai SDK) — локальная LLM для расписания, мотивации и чата
-  • faster-whisper — локальное распознавание голоса
-  • aiosqlite — асинхронный SQLite
-  • APScheduler — фоновые задания (утро / вечер / напоминания)
-
-Замечание про event loop:
-  python-telegram-bot v21 сам управляет своим asyncio loop в run_polling().
-  Поэтому main() здесь СИНХРОННАЯ — никакого asyncio.run(main()).
-  Всё, что должно быть async (db.init, scheduler.start), уносится в
-  post_init-хук, который PTB вызывает внутри своего loop.
-"""
-
 import asyncio
 import logging
 
@@ -66,14 +49,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-# Подробные логи только от нашего ai_client'а — увидим длину/содержимое
-# ответов модели, не утопая в шуме httpx и telegram.
 logging.getLogger("ai_client").setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 
 async def _post_init(app: Application) -> None:
-    """Запускается уже внутри event loop'а PTB — здесь делаем всё async."""
     db: Database = app.bot_data["db"]
     await db.init()
 
@@ -117,28 +97,17 @@ async def _post_init(app: Application) -> None:
 
 
 async def _post_shutdown(app: Application) -> None:
-    """Аккуратно останавливаем scheduler при Ctrl+C."""
     scheduler = app.bot_data.get("scheduler")
     if scheduler is not None:
         scheduler.shutdown(wait=False)
 
 
 async def _error_handler(update: object, ctx) -> None:
-    """
-    Глобальный обработчик ошибок. PTB вызывает его, когда внутри handler'а
-    выскочило исключение. Здесь мы:
-      • записываем стек в лог (как и раньше),
-      • пытаемся сказать пользователю что-то осмысленное вместо тишины.
-
-    Особо ловим сетевые ошибки (TimedOut/NetworkError) — они почти всегда
-    означают, что VPN/прокси временно тупит и ничего страшного не случилось.
-    """
     from telegram.error import NetworkError, TimedOut
 
     err = ctx.error
     log.error("Handler raised an exception", exc_info=err)
 
-    # Попытаемся ответить пользователю, если это его сообщение
     try:
         from telegram import Update as _Update
         if isinstance(update, _Update) and update.effective_message is not None:
@@ -152,7 +121,7 @@ async def _error_handler(update: object, ctx) -> None:
 
 
 def _with_user_lock(handler):
-    """Гарантирует, что один пользователь не может запустить handler дважды одновременно."""
+    """Предотвращает параллельный запуск handler'а одним пользователем."""
     async def wrapper(update: Update, ctx):
         user_id = update.effective_user.id
         active: set = ctx.bot_data.setdefault("active_users", set())
@@ -206,14 +175,12 @@ def main() -> None:
         .build()
     )
 
-    # Inject shared objects into bot_data
     app.bot_data["config"] = config
     app.bot_data["db"] = db
     app.bot_data["ai"] = ai
     app.bot_data["voice"] = voice
     app.bot_data["weather"] = weather
 
-    # ── Conversation: schedule creation ───────────────────────────────────────
     schedule_conv = ConversationHandler(
         entry_points=[CommandHandler("schedule", schedule_command)],
         states={
@@ -228,7 +195,6 @@ def main() -> None:
         allow_reentry=True,
     )
 
-    # ── Command handlers ───────────────────────────────────────────────────────
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("start", start_command))
@@ -248,33 +214,21 @@ def main() -> None:
     app.add_handler(CommandHandler("pomodoro", pomodoro_command))
     app.add_handler(schedule_conv)
 
-    # ── Voice messages & location ──────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.VOICE, _with_user_lock(handle_voice)))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
-    # ── Inline keyboard callbacks ──────────────────────────────────────────────
-    # menu: ПЕРВЫМ — до tasks?:, т.к. menu:* не попадает под tasks?:, но для надёжности
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_schedule_callback, pattern=r"^(schedule_|myplan:)"))
-    # task:done|delete:<id>[:<page>] — действия по задаче (одиночная карточка или из списка)
-    # tasks:page:<n> / tasks:noop   — перелистывание постраничного /tasks
     app.add_handler(CallbackQueryHandler(handle_task_callback, pattern=r"^tasks?:"))
-    # settings:* — переключение характера, очистка истории
     app.add_handler(CallbackQueryHandler(handle_settings_callback, pattern=r"^settings:"))
-    # note:delete:<id>
     app.add_handler(CallbackQueryHandler(handle_notes_callback, pattern=r"^note:"))
-    # pomodoro:work|break:<minutes>
     app.add_handler(CallbackQueryHandler(handle_pomodoro_callback, pattern=r"^pomodoro:"))
 
-    # ── Free-form text (AI chat) ───────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _with_user_lock(handle_text_message)))
-
-    # ── Global error handler ──────────────────────────────────────────────────
     app.add_error_handler(_error_handler)
 
     log.info("TManager starting…")
-    # run_polling() сам создаёт и закрывает event loop. Блокирующий вызов.
     app.run_polling(drop_pending_updates=True)
 
 

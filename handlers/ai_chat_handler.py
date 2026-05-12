@@ -1,18 +1,3 @@
-"""
-Handles free-form text messages.
-
-Пайплайн:
-  1. Прогоняем сообщение через ai.process_user_intent — за один LLM-вызов
-     получаем И намерение, И готовый ответ для чата.
-  2. Если намерение «действие» (add/done/delete/schedule) — выполняем
-     соответствующие операции с БД и поверх них шлём сформированный reply.
-  3. Если намерение «chat» — просто шлём reply.
-
-Это означает, что пользователь может управлять задачами обычным текстом:
-  «удали отчёт», «отметь что зарядку сделал», «добавь купить хлеб»,
-  и не требуется помнить /task /done /delete-команды.
-"""
-
 import logging
 from datetime import date, timedelta
 
@@ -28,7 +13,6 @@ _MAX_TG = 4096
 
 
 async def _send_final(processing_msg, text: str, parse_mode=None, reply_markup=None) -> None:
-    """Отправляет ответ, разбивая на части если длиннее лимита Telegram."""
     if len(text) <= _MAX_TG:
         await processing_msg.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
         return
@@ -47,7 +31,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     ai: AIClient = ctx.bot_data["ai"]
     user = update.effective_user
 
-    # Ожидаем ввод города после нажатия «🌍 Город» в настройках
     if ctx.user_data.get("awaiting_city"):
         ctx.user_data.pop("awaiting_city")
         from weather_client import WeatherClient
@@ -66,7 +49,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text("Укажи название города текстом.")
         return
 
-    # Ожидаем текст новой заметки после нажатия «➕ Новая заметка»
     if ctx.user_data.get("awaiting_note"):
         ctx.user_data.pop("awaiting_note")
         db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
@@ -82,8 +64,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     context = await db.get_user_summary_context(user.id)
     personality = await db.get_personality(user.id)
 
-    # Короткая история диалога — нужна, чтобы intent-роутер учёл контекст
-    # предыдущих реплик («сделал это» — ссылается на ранее упомянутую задачу).
     history = ctx.user_data.get("chat_history", [])
 
     text = update.message.text
@@ -139,9 +119,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             op=db.complete_task,
         )
         if completed:
-            reply = ""  # action-подтверждение важнее AI-текста
-            # Зеркалим в текущее недельное расписание — пункты с тем же
-            # названием получают done=true в /myplan.
+            reply = ""
             for title in completed:
                 try:
                     await db.mark_schedule_items_done_by_title(db_user["id"], title)
@@ -167,7 +145,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             op=db.delete_task,
         )
         if deleted:
-            reply = ""  # action-подтверждение важнее AI-текста
+            reply = ""
             extra_lines.append(
                 "🗑 Удалено: " + ", ".join(f"«{t}»" for t in deleted)
             )
@@ -192,7 +170,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                     "Не получилось разобрать расписание, попробуй уточнить запрос."
                 )
             else:
-                # AI может вернуть конкретную дату начала недели (произвольная дата)
                 if schedule.get("target_week_start"):
                     try:
                         d = date.fromisoformat(schedule["target_week_start"])
@@ -200,7 +177,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                     except ValueError:
                         pass
 
-                # Снимаем плоский список items для replace_week_schedule_tasks
                 items: list[dict] = []
                 DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
                             "friday", "saturday", "sunday"]
@@ -219,7 +195,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                         "Расписание получилось пустым — уточни запрос."
                     )
                 else:
-                    # Проверяем, есть ли уже задачи на затрагиваемые дни
                     affected_days = {item["day"] for item in items}
                     existing = await db.get_week_tasks_grouped(db_user["id"], target_monday)
                     has_existing = any(existing.get(d) for d in affected_days)
@@ -337,24 +312,19 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         if updated:
             extra_lines.append("\n".join(updated))
 
-    # Собираем итоговый ответ
     final = reply
     if extra_lines:
         final = (final + "\n\n" if final else "") + "\n\n".join(extra_lines)
     if not final.strip():
         final = "Хм, не уловил, что делать. Перефразируй?"
 
-    # Кнопка отката — добавляем под ответом ТОЛЬКО для крупных изменений
-    # расписания (regenerate / modify_schedule), которые что-то реально применили.
     reply_markup = None
     if intent in ("schedule", "modify_schedule") and extra_lines:
         reply_markup = InlineKeyboardMarkup([[
             InlineKeyboardButton("↩ Отменить изменения", callback_data="schedule_undo")
         ]])
 
-    # Историю чата ведём только для intent=chat (для multi-turn диалога).
-    # Команды-действия в историю не пишем — иначе модель будет «вспоминать»,
-    # что мы уже что-то добавляли, и путаться при повторе.
+    # Действия (add/done/delete) в историю не пишем — модель путается при повторе.
     if intent == "chat":
         history.append({"role": "user", "content": text})
         history.append({"role": "assistant", "content": reply or final})
@@ -362,7 +332,6 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
     await _send_final(processing_msg, final, parse_mode="HTML", reply_markup=reply_markup)
 
-    # Раз в 5 сообщений — синтез наблюдения в дневник
     cnt = ctx.user_data.get("interaction_count", 0) + 1
     ctx.user_data["interaction_count"] = cnt
     if cnt % 5 == 0:
@@ -387,17 +356,11 @@ async def _apply_by_ids_or_titles(
     titles: list[str],
     op,
 ) -> list[str]:
-    """
-    Применяет op(task_id, user_id) к набору задач.
-
-    Titles — основной путь (точное название надёжнее, чем числовой ID от LLM).
-    IDs — запасной путь, используется только когда titles пустой.
-    """
+    """Titles — основной путь (надёжнее ID от LLM); IDs — запасной, если titles пуст."""
     affected: list[str] = []
     seen_ids: set[int] = set()
 
     if titles:
-        # Основной путь: ищем по названию — LLM знает имя задачи из сообщения
         for title in titles:
             if not title or not title.strip():
                 continue
@@ -412,7 +375,6 @@ async def _apply_by_ids_or_titles(
             if applied:
                 affected.append(applied["title"])
     else:
-        # Запасной путь: по ID, только если titles не предоставлены
         for raw in ids:
             try:
                 tid = int(raw)
@@ -451,14 +413,6 @@ async def _apply_schedule_changes(
     user_id: int,
     changes: list[dict],
 ) -> tuple[list[str], list[str]]:
-    """
-    Точечные правки НА УРОВНЕ ЗАДАЧ:
-      • add    — создаёт новую задачу на дату (from_schedule=0, отметится «доп»)
-      • remove — удаляет задачу по названию (внутри указанной даты)
-      • move   — переносит задачу: меняет due_date (и time, если задан)
-
-    Поля date/from_date/to_date — конкретные ISO-даты (YYYY-MM-DD).
-    """
     applied: list[str] = []
     errors: list[str] = []
 

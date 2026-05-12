@@ -1,8 +1,3 @@
-"""
-/start — register user, send welcome
-/help  — command reference
-"""
-
 from telegram import Update
 from telegram.ext import ContextTypes
 

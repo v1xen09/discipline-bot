@@ -1,11 +1,3 @@
-"""
-Handles incoming voice messages:
-  1. Download OGG from Telegram
-  2. Transcribe via Whisper
-  3. Use AI to extract intent (add tasks / schedule / done / chat)
-  4. Execute intent and reply
-"""
-
 import logging
 
 from telegram import Update

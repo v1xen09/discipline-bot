@@ -10,27 +10,20 @@ load_dotenv()
 
 @dataclass
 class Config:
-    # ── Telegram ───────────────────────────────────────────────────────────────
     TELEGRAM_TOKEN: str = field(default_factory=lambda: os.getenv("TELEGRAM_TOKEN", ""))
 
-    # ── LM Studio (LLM) ────────────────────────────────────────────────────────
-    # URL OpenAI-совместимого сервера. В LM Studio: вкладка «Developer» → Start Server.
     LMSTUDIO_BASE_URL: str = field(
         default_factory=lambda: os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:4321/v1")
     )
-    # Имя загруженной модели: Developer → раздел загруженной модели, или GET /models.
     LMSTUDIO_MODEL: str = field(default_factory=lambda: os.getenv("LMSTUDIO_MODEL", ""))
-    # Локальный сервер не проверяет ключ, но openai SDK требует непустую строку.
+    # openai SDK требует непустую строку; LM Studio ключ не проверяет.
     LMSTUDIO_API_KEY: str = field(
         default_factory=lambda: os.getenv("LMSTUDIO_API_KEY", "lm-studio")
     )
-    # Сколько секунд ждать ответ модели (генерация на CPU может быть долгой).
     LMSTUDIO_TIMEOUT: int = field(
         default_factory=lambda: int(os.getenv("LMSTUDIO_TIMEOUT", "180"))
     )
 
-    # ── faster-whisper (STT) ───────────────────────────────────────────────────
-    # tiny | base | small | medium | large-v3 — small: баланс качества/скорости.
     WHISPER_MODEL_SIZE: str = field(
         default_factory=lambda: os.getenv("WHISPER_MODEL_SIZE", "small")
     )
@@ -39,17 +32,13 @@ class Config:
         default_factory=lambda: os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     )
 
-    # ── Яндекс.Погода (опционально) ───────────────────────────────────────────
-    # Ключ: https://developer.tech.yandex.ru/ → тестовый план (50 req/day, бесплатно)
+    # Ключ Яндекс.Погоды: https://developer.tech.yandex.ru/ → тестовый план (50 req/day).
     YANDEX_WEATHER_KEY: str = field(default_factory=lambda: os.getenv("YANDEX_WEATHER_KEY", "fa0f11a5-fd86-48c2-b07f-ef6e45a933a8"))
 
-    # ── Storage ────────────────────────────────────────────────────────────────
     DATABASE_PATH: str = field(default_factory=lambda: os.getenv("DATABASE_PATH", "tmanager.db"))
-
     BOT_NAME: str = field(default_factory=lambda: os.getenv("BOT_NAME", "TManager"))
 
-    # ── Администратор ─────────────────────────────────────────────────────────
-    # Telegram ID владельца — открывает /admin (узнать: @userinfobot). 0 = отключено.
+    # Telegram ID владельца — открывает /admin. 0 = отключено.
     ADMIN_TELEGRAM_ID: int = field(
         default_factory=lambda: int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
     )

@@ -1,20 +1,3 @@
-"""
-/schedule — interactive weekly schedule creation.
-/myplan   — show current week's plan, day by day, with completion checkboxes.
-
-Flow:
-  1. /schedule → bot asks what to plan
-  2. User replies with free text
-  3. AI generates JSON schedule
-  4. Bot displays it и сохраняет в БД
-  5. По клику пользователь импортирует план в задачи
-     (с дедупликацией: повторяющиеся названия → одна recurring-задача)
-
-В /myplan показ постраничный — день недели на сообщение,
-у каждого пункта своя кнопка ✅ для отметки. Состояние «выполнено»
-хранится прямо в schedule_json (поле "done": true в каждом item).
-"""
-
 import json
 import logging
 from collections import defaultdict
@@ -39,7 +22,6 @@ def _monday_for_offset(offset: int) -> date:
 
 
 def _viewed_monday(ctx) -> date:
-    """Возвращает просматриваемую неделю из user_data или текущую."""
     iso = ctx.user_data.get("myplan_week_monday")
     if iso:
         try:
@@ -64,8 +46,6 @@ DAY_SHORT = {
     "friday": "Пт", "saturday": "Сб", "sunday": "Вс",
 }
 
-
-# ── /schedule — генерация плана ──────────────────────────────────────────────
 
 async def schedule_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     m0 = _monday_for_offset(0)
@@ -134,7 +114,6 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    # AI мог вернуть конкретную дату (произвольная неделя)
     target_monday = _resolve_target_monday(schedule, target_monday)
 
     items: list[dict] = []
@@ -154,7 +133,6 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return ConversationHandler.END
 
-    # Проверяем, есть ли уже задачи на затрагиваемые дни
     affected_days = {it["day"] for it in items}
     existing = await db.get_week_tasks_grouped(db_user["id"], target_monday)
     has_existing = any(existing.get(d) for d in affected_days)

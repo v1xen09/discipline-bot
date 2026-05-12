@@ -132,7 +132,6 @@ class Database:
                     pass  # столбец уже есть
             await db.commit()
         log.info("Database initialized at %s", self.path)
-    # ─── User helpers ──────────────────────────────────────────────────────────
 
     async def get_or_create_user(
         self,
@@ -192,12 +191,7 @@ class Database:
             return (row[0] if row else "soft") or "soft"
 
     async def clear_user_history(self, telegram_id: int) -> dict:
-        """
-        Стирает ВСЕ данные конкретного пользователя — задачи, выполнения,
-        стрики, расписания, дневник — но сохраняет сам user-аккаунт и
-        его настройки (personality). Возвращает dict с числами удалённых
-        строк по таблицам, чтобы можно было показать пользователю отчёт.
-        """
+        """Стирает данные пользователя (задачи/стрики/расписание/дневник), но не аккаунт и настройки."""
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
@@ -215,8 +209,6 @@ class Database:
                 counts[table] = cur.rowcount or 0
             await db.commit()
             return counts
-
-    # ─── Task helpers ──────────────────────────────────────────────────────────
 
     async def add_task(
         self,
@@ -249,13 +241,6 @@ class Database:
     async def get_week_tasks_grouped(
         self, user_id: int, monday: date
     ) -> dict[str, list[dict]]:
-        """
-        Вернуть АКТИВНЫЕ задачи на неделю, сгруппированные по дням недели:
-            {monday: [...], ..., sunday: [...], undated: [...]}
-        Внутри каждого дня сортировка: сначала по time (NULL в конец), потом по
-        from_schedule DESC (плановые сверху, доп. ниже), потом по id.
-        В undated кладём задачи без due_date.
-        """
         DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
                     "friday", "saturday", "sunday"]
         out: dict[str, list[dict]] = {k: [] for k in DAY_KEYS}
@@ -294,19 +279,7 @@ class Database:
         self, user_id: int, monday: date, items: list[dict],
         save_snapshot: bool = True,
     ) -> tuple[int, int]:
-        """
-        Атомарно заменить «плановые» задачи на текущую неделю:
-          • удалить все активные задачи с from_schedule=1 и due_date в этой неделе
-          • вставить новые из items, каждая с from_schedule=1
-
-        items: [{"day": "monday", "time": "09:00"|None, "task": "...", "description": "..."}]
-
-        save_snapshot=True (default) — перед заменой сохраняет текущие задачи в
-        schedules.previous_json, чтобы undo мог восстановить их.
-        save_snapshot=False — используется самим undo, чтобы не затирать snapshot.
-
-        Возвращает (удалено, добавлено).
-        """
+        """Атомарно заменяет плановые задачи недели. save_snapshot=False используется undo, чтобы не затирать точку отката."""
         DAY_IDX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
                    "friday": 4, "saturday": 5, "sunday": 6}
         IDX_DAY = {v: k for k, v in DAY_IDX.items()}
@@ -317,7 +290,6 @@ class Database:
             db.row_factory = aiosqlite.Row
 
             if save_snapshot:
-                # Читаем текущие плановые задачи, чтобы сохранить как previous_json
                 cur = await db.execute(
                     """SELECT title, description, due_date, time FROM tasks
                        WHERE user_id = ? AND from_schedule = 1 AND completed = 0
@@ -339,7 +311,6 @@ class Database:
                         pass
                 prev_json = json.dumps(prev_snap, ensure_ascii=False)
 
-                # Сохраняем текущее как previous, новое поставим после вставки
                 cur2 = await db.execute(
                     "SELECT id FROM schedules WHERE user_id = ? AND week_start = ?",
                     (user_id, monday_iso),
@@ -357,14 +328,12 @@ class Database:
                            VALUES (?, ?, '{}', ?)""",
                         (user_id, monday_iso, prev_json),
                     )
-                    # предыдущего JSON ещё не было — запишем prev_json правильно
                     await db.execute(
                         """UPDATE schedules SET previous_json = ?
                            WHERE user_id = ? AND week_start = ?""",
                         (prev_json, user_id, monday_iso),
                     )
 
-            # Удаляем старые плановые задачи
             cur = await db.execute(
                 """DELETE FROM tasks
                    WHERE user_id = ? AND from_schedule = 1 AND completed = 0
@@ -373,7 +342,6 @@ class Database:
             )
             deleted_n = cur.rowcount or 0
 
-            # Вставляем новые и строим snapshot нового состояния
             new_snap: dict = {k: [] for k in DAY_IDX}
             added_n = 0
             for it in items:
@@ -396,7 +364,6 @@ class Database:
                 added_n += 1
 
             if save_snapshot:
-                # Обновляем schedule_json до актуального состояния
                 await db.execute(
                     """UPDATE schedules SET schedule_json = ?
                        WHERE user_id = ? AND week_start = ?""",
@@ -431,18 +398,7 @@ class Database:
             return [dict(r) for r in await cur.fetchall()]
 
     async def complete_task(self, task_id: int, user_id: int) -> Optional[dict]:
-        """
-        Отметить задачу выполненной.
-
-        • Для одноразовых задач — выставляем completed=1, задача исчезает из /tasks.
-        • Для recurring-задач (привычек) — НЕ ставим completed=1, иначе задача
-          пропадёт навсегда. Просто логируем выполнение за сегодня и обновляем
-          streak. На следующий день задача снова актуальна.
-
-        Идемпотентно для recurring: если уже отмечено сегодня — повторный
-        вызов ничего не делает (стрик не дублируется), возвращаем задачу как
-        подтверждение.
-        """
+        """Для recurring-задач не ставит completed=1 (иначе задача пропадёт навсегда) — только логирует выполнение."""
         today = date.today().isoformat()
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -455,11 +411,9 @@ class Database:
                 return None
             task = dict(row)
 
-            # Для одноразовой — если уже completed=1, считаем «не нашли»
             if not task.get("recurring") and task.get("completed"):
                 return None
 
-            # Для recurring проверяем, не отмечали ли мы её сегодня
             if task.get("recurring"):
                 cur = await db.execute(
                     "SELECT 1 FROM completions WHERE task_id = ? AND completed_on = ?",
@@ -481,15 +435,12 @@ class Database:
             )
             await db.commit()
 
-        # Стрик-таблица больше не показывается пользователю (заменена аналитикой
-        # коэффициента дня). Запись completion остаётся — она нужна для daily_stats.
+        # Запись completion нужна для daily_stats даже без отображения стриков.
         return task
 
     async def find_active_task_by_title_exact(
         self, user_id: int, title: str
     ) -> Optional[dict]:
-        """Точное совпадение названия (case-insensitive). Используется для
-        синхронизации /myplan ↔ recurring-задачи: один и тот же title."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -506,13 +457,6 @@ class Database:
     async def mark_schedule_items_done_by_title(
         self, user_id: int, title: str, day_key: Optional[str] = None
     ) -> int:
-        """
-        Зеркальная сторона синхронизации: когда пользователь отметил задачу
-        выполненной (через /tasks-кнопку или из чата), помечаем
-        соответствующие пункты в текущем недельном расписании как done=true.
-        Если day_key указан — только в этом дне; иначе во всех днях.
-        Возвращает число затронутых пунктов.
-        """
         monday = (date.today() - timedelta(days=date.today().weekday())).isoformat()
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -544,8 +488,6 @@ class Database:
             return touched
 
     async def delete_task(self, task_id: int, user_id: int) -> Optional[dict]:
-        """Полностью удаляет задачу. Связанные completions/streaks
-        удалятся автоматически через ON DELETE CASCADE."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -561,7 +503,6 @@ class Database:
             return task
 
     async def get_task_by_id(self, task_id: int, user_id: int) -> Optional[dict]:
-        """Получить одну задачу по PK, ограниченную пользователем."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -573,8 +514,7 @@ class Database:
     async def update_task_time(
         self, task_id: int, user_id: int, time: Optional[str]
     ) -> Optional[dict]:
-        """Обновить время задачи. Сбрасывает существующее напоминание,
-        т.к. оно было рассчитано относительно старого времени."""
+        """Сбрасывает напоминание при изменении времени — оно было рассчитано относительно старого."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -594,10 +534,7 @@ class Database:
             return dict(row) if row else None
 
     async def find_tasks_by_title(self, user_id: int, query: str, limit: int = 5) -> list[dict]:
-        """Нечёткий поиск задач по подстроке в названии. Используется AI-роутером
-        для удаления/завершения задач по фразе пользователя.
-        Регистрируем Python str.lower как SQLite-функцию — она корректно
-        обрабатывает кириллицу, в отличие от встроенного SQLite LOWER()."""
+        # lower_py вместо SQLite LOWER() — встроенный не обрабатывает кириллицу.
         q_lower = query.strip().lower()
         async with aiosqlite.connect(self.path) as db:
             await db.create_function("lower_py", 1, str.lower)
@@ -621,7 +558,6 @@ class Database:
     async def set_task_priority(
         self, task_id: int, user_id: int, priority: Optional[str]
     ) -> Optional[dict]:
-        """Set priority (high|medium|low|None) on a task. Returns updated task or None."""
         valid_priorities = {"high", "medium", "low", None}
         if priority not in valid_priorities:
             priority = None
@@ -673,16 +609,9 @@ class Database:
             )
             return [dict(r) for r in await cur.fetchall()]
 
-    # ─── Task reminder helpers ─────────────────────────────────────────────────
-
     async def set_task_reminder(
         self, task_id: int, user_id: int, notify_before: Optional[int]
     ) -> Optional[dict]:
-        """
-        Set or clear a reminder for a task.
-        notify_before: minutes before task time (30/60/120), or None to clear.
-        Returns updated task or None if task not found / has no time.
-        """
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -709,7 +638,7 @@ class Database:
             h, m = map(int, task["time"].split(":"))
             total = h * 60 + m - notify_before
             if total < 0:
-                return None  # reminder would be before midnight
+                return None
 
             remind_h, remind_m = divmod(total, 60)
             remind_at = f"{remind_h:02d}:{remind_m:02d}"
@@ -744,8 +673,6 @@ class Database:
                 task_ids,
             )
             await db.commit()
-
-    # ─── Notification settings helpers ────────────────────────────────────────
 
     async def get_notification_settings(self, telegram_id: int) -> dict:
         async with aiosqlite.connect(self.path) as db:
@@ -787,8 +714,6 @@ class Database:
             )
             await db.commit()
 
-    # ─── Location / weather helpers ───────────────────────────────────────────
-
     async def get_location(self, telegram_id: int) -> dict:
         """Вернуть {"city": str|None, "lat": float|None, "lon": float|None}."""
         async with aiosqlite.connect(self.path) as db:
@@ -816,8 +741,6 @@ class Database:
             )
             await db.commit()
 
-    # ─── Schedule helpers ──────────────────────────────────────────────────────
-
     async def save_schedule(
         self,
         user_id: int,
@@ -826,19 +749,10 @@ class Database:
         *,
         keep_history: bool = False,
     ) -> None:
-        """
-        Сохранить расписание на неделю.
-
-        keep_history=False (по умолчанию) — обычное сохранение без записи в историю.
-                          Используется для технических обновлений (toggle done и т.п.).
-        keep_history=True — перед записью копирует текущее schedule_json в
-                          previous_json как точку отката. Это нужно при
-                          серьёзных изменениях через ИИ или регенерации.
-        """
+        """keep_history=True сохраняет текущее расписание как previous_json перед перезаписью."""
         new_json = json.dumps(schedule, ensure_ascii=False)
         async with aiosqlite.connect(self.path) as db:
             if keep_history:
-                # Сначала прочитаем существующее, чтобы перенести его в previous_json
                 cur = await db.execute(
                     "SELECT schedule_json FROM schedules WHERE user_id = ? AND week_start = ?",
                     (user_id, week_start),
@@ -864,12 +778,7 @@ class Database:
             await db.commit()
 
     async def restore_schedule_previous(self, user_id: int, week_start: str) -> Optional[dict]:
-        """
-        Откатить расписание на одну позицию назад: текущее уходит в previous_json,
-        previous_json становится текущим. Поддерживает «качели» — повторный откат
-        вернёт нас обратно. Возвращает восстановленное расписание или None,
-        если откатывать нечего.
-        """
+        """Swap schedule_json ↔ previous_json (поддерживает «качели» — повторный undo возвращает обратно)."""
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -903,8 +812,6 @@ class Database:
             d = dict(row)
             d["schedule"] = json.loads(d["schedule_json"])
             return d
-
-    # ─── Streak helpers ────────────────────────────────────────────────────────
 
     async def _update_streak(self, task_id: int, user_id: int, today: str) -> None:
         async with aiosqlite.connect(self.path) as db:
@@ -970,8 +877,6 @@ class Database:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    # ─── Diary helpers (AI memory) ────────────────────────────────────────────
-
     async def add_diary_entry(
         self,
         user_id: int,
@@ -999,9 +904,7 @@ class Database:
             return [dict(r) for r in await cur.fetchall()]
 
     async def get_user_summary_context(self, telegram_id: int) -> str:
-        """Build a context string from diary + tasks + notes for injecting into AI prompts."""
-        # Конвертируем Telegram ID → DB user ID (метод везде вызывается с telegram_id,
-        # но все таблицы хранят DB ID, а не Telegram ID).
+        """Строит контекст из дневника/задач/заметок для инъекции в AI-промпты."""
         db_user = await self.get_user_by_telegram_id(telegram_id)
         if not db_user:
             return ""
@@ -1041,7 +944,6 @@ class Database:
 
         parts: list[str] = []
 
-        # 1. Планы на сегодня — в начало, чтобы ИИ видел сразу
         if today_tasks:
             lines = []
             for t in today_tasks:
@@ -1051,7 +953,6 @@ class Database:
         else:
             parts.append(f"Планы на сегодня ({today}): нет запланированных задач")
 
-        # 2. Остаток недели — сгруппированы по дням
         if week_tasks:
             _DAY_RU = {
                 0: "Понедельник", 1: "Вторник", 2: "Среда", 3: "Четверг",
@@ -1070,7 +971,6 @@ class Database:
                     lines.append(f"- {day_label}: {time_part}{t['title']}")
             parts.append("Планы на неделю:\n" + "\n".join(lines))
 
-        # 3. Все активные задачи с ID — для управления через ИИ (done/delete/priority)
         if tasks:
             task_text = "\n".join(
                 f"- [id={t['id']}] {t['title']}"
@@ -1081,22 +981,18 @@ class Database:
             )
             parts.append(f"Активные задачи (с ID):\n{task_text}")
 
-        # 4. Просроченные
         if overdue:
             overdue_text = "\n".join(f"- {t['title']} (просрочено {t['due_date']})" for t in overdue)
             parts.append(f"Просроченные задачи:\n{overdue_text}")
 
-        # 5. Серии
         if streaks:
             streak_text = "\n".join(f"- {s['title']}: {s['current_streak']} дней подряд 🔥" for s in streaks[:5])
             parts.append(f"Текущие серии:\n{streak_text}")
 
-        # 6. Дневник
         if diary:
             diary_text = "\n".join(f"- [{e['entry_type']}] {e['content']}" for e in diary)
             parts.append(f"Дневник наблюдений:\n{diary_text}")
 
-        # 7. Заметки
         if notes:
             notes_text = "\n".join(f"- [id={n['id']}] {n['content']}" for n in notes)
             parts.append(f"Последние заметки (с ID):\n{notes_text}")
@@ -1116,26 +1012,9 @@ class Database:
 
         return {"period_days": days, "completions": total}
 
-    # ─── Productivity analytics ────────────────────────────────────────────────
-
     async def daily_stats(self, user_id: int, day: date) -> dict:
-        """
-        Возвращает статистику за конкретный день:
-            planned   — сколько задач было «запланировано» на этот день
-                        (one-off c due_date=день + все recurring,
-                        существовавшие к этому моменту)
-            completed — сколько completion-записей упало на этот день;
-                        просроченные задачи, выполненные именно в этот день,
-                        тут учитываются как +1 к completed (но не к planned).
-            rate      — completed / max(1, planned), capped at 1.0; None если
-                        в этот день вообще ничего не было запланировано
-                        (нет смысла считать процент).
-        """
         day_iso = day.isoformat()
         async with aiosqlite.connect(self.path) as db:
-            # Запланировано: одноразовые с due_date=day + recurring, созданные ≤ day.
-            # Recurring, удалённые между датой создания и day, мы не учитываем
-            # (записи нет — её и не считаем). Это сознательный компромисс.
             cur = await db.execute(
                 """SELECT COUNT(*) FROM tasks
                    WHERE user_id = ?
@@ -1147,9 +1026,7 @@ class Database:
             )
             planned = (await cur.fetchone())[0] or 0
 
-            # Считаем только выполнения задач, запланированных на этот день
-            # или recurring. Просроченные задачи, выполненные сегодня, не
-            # должны влиять на коэффициент дня — они не были в плане на сегодня.
+            # Просроченные задачи не влияют на rate — они не были в плане на этот день.
             cur = await db.execute(
                 """SELECT COUNT(*) FROM completions c
                    JOIN tasks t ON t.id = c.task_id
@@ -1176,15 +1053,12 @@ class Database:
     async def daily_stats_range(
         self, user_id: int, start: date, end: date
     ) -> list[dict]:
-        """Список dict-ов daily_stats по каждому дню от start до end включительно."""
         out: list[dict] = []
         cur = start
         while cur <= end:
             out.append(await self.daily_stats(user_id, cur))
             cur += timedelta(days=1)
         return out
-
-    # ─── Notes ────────────────────────────────────────────────────────────────
 
     async def add_note(self, user_id: int, content: str, source: str = "manual") -> int:
         async with aiosqlite.connect(self.path) as db:

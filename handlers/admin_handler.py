@@ -1,19 +1,3 @@
-"""
-/admin — панель диагностики для администратора.
-
-Доступна только пользователю с ADMIN_TELEGRAM_ID из config.
-Если ADMIN_TELEGRAM_ID == 0 — команда отключена полностью.
-
-callback_data:
-  admin:open     — обновить панель
-  admin:weather  — проверить Яндекс.Погода по сохранённым координатам
-  admin:morning  — отправить утреннее сообщение прямо сейчас
-  admin:evening  — отправить вечернее сообщение прямо сейчас
-  admin:reminder — отправить напоминание о задачах прямо сейчас
-  admin:diary    — запустить синтез дневника прямо сейчас
-  admin:set_city — задать город (awaiting_city = True)
-"""
-
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update

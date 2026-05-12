@@ -1,13 +1,3 @@
-"""
-Background scheduler jobs using APScheduler.
-
-Jobs:
-  • notification_dispatcher — every 1 minute: routes morning/evening/reminder
-                              messages per user's personal schedule settings,
-                              and fires task-specific reminders (🔔)
-  • diary_synthesis         — daily at 23:30: AI memory consolidation
-"""
-
 import logging
 from datetime import date, datetime
 
@@ -44,14 +34,7 @@ def setup_scheduler(app: Application) -> AsyncIOScheduler:
     return scheduler
 
 
-# ─── Dispatcher ────────────────────────────────────────────────────────────────
-
 async def _notification_dispatcher(app: Application) -> None:
-    """
-    Runs every minute. For each user checks whether the current HH:MM matches
-    their personal morning / reminder / evening times, then fires the appropriate
-    message. Also sends task-specific 🔔 reminders.
-    """
     now = datetime.now().strftime("%H:%M")
     today = date.today().isoformat()
 
@@ -94,10 +77,7 @@ async def _notification_dispatcher(app: Application) -> None:
             log.warning("Dispatcher failed for %d: %s", tg_id, e)
 
 
-# ─── Message senders ───────────────────────────────────────────────────────────
-
 def _format_weather_block(w: dict, city: str | None) -> str:
-    """Форматирует блок погоды с советом по одежде для конца утреннего сообщения."""
     temp = w["temp"]
     feels = w["feels_like"]
     condition = w["condition"]
@@ -141,7 +121,6 @@ async def _send_morning(app, tg_id, user_id, db, ai, personality) -> None:
     trigger = "overdue" if overdue else "morning"
     text = ai.generate_motivation(context, trigger=trigger, personality=personality)
 
-    # Погода — фиксированный блок в конце, только если пользователь включил
     weather_block = None
     if settings.get("weather"):
         weather_client = app.bot_data.get("weather")
@@ -257,10 +236,7 @@ async def _send_evening(app, tg_id, user_id, db, ai, personality) -> None:
         )
 
 
-# ─── Diary synthesis ───────────────────────────────────────────────────────────
-
 async def _diary_synthesis_job(app: Application) -> None:
-    """AI memory: synthesize today's events into diary entries."""
     db: Database = app.bot_data["db"]
     ai: AIClient = app.bot_data["ai"]
     user_ids = await db.get_all_user_ids()

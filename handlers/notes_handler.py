@@ -1,16 +1,3 @@
-"""
-/note <text>  — добавить заметку
-/notes        — список заметок с навигацией по карточкам
-
-ИИ тоже может сохранять заметки через intent=add_note (см. ai_chat_handler).
-
-callback_data:
-  note:list          — список заметок
-  note:view:<id>     — карточка заметки
-  note:delete:<id>   — удалить заметку, вернуться к списку
-  note:new           — запросить текст новой заметки
-"""
-
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update

@@ -1,17 +1,3 @@
-"""
-Главное меню бота — единое сообщение-хаб с навигацией по разделам.
-
-/menu — открыть меню (отправляет новое сообщение)
-
-callback_data:
-  menu:main     — вернуться к главному меню (edit_message_text)
-  menu:tasks    — показать задачи (страница 0)
-  menu:plan     — показать план на текущий день недели
-  menu:notes    — показать заметки
-  menu:today    — показать текстовую статистику за сегодня
-  menu:settings — показать настройки
-"""
-
 import logging
 from datetime import date
 
@@ -65,7 +51,6 @@ async def handle_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
 
-    # Сбрасываем флаги ожидания ввода при навигации через меню
     ctx.user_data.pop("awaiting_city", None)
     ctx.user_data.pop("awaiting_note", None)
 

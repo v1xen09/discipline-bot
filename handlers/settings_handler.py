@@ -1,24 +1,3 @@
-"""
-/settings — пользовательские настройки.
-
-Разделы:
-  • Характер бота: soft / neutral / strict / playful
-  • Уведомления: утреннее время, вечернее время, авто-напоминания (0–3 слота)
-  • Очистка персональной истории
-
-callback_data:
-  settings:open                            — главное меню
-  settings:persona:<key>                   — установить характер
-  settings:notif_open                      — открыть меню уведомлений
-  settings:notif_morning:<HH:MM|off>       — установить/выключить утреннее
-  settings:notif_evening:<HH:MM|off>       — установить/выключить вечернее
-  settings:notif_reminders:<preset>        — выбрать пресет напоминаний
-  settings:notif_pick_morning              — показать сетку выбора времени (утро)
-  settings:notif_pick_evening              — показать сетку выбора времени (вечер)
-  settings:wipe                            — показать подтверждение очистки
-  settings:wipe:confirm                    — выполнить очистку
-"""
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
@@ -26,7 +5,6 @@ from telegram.ext import ContextTypes
 from ai_client import PERSONALITY_LABELS
 from database import Database
 
-# Пресеты напоминаний: label → значение notify_reminders (или None = выкл)
 _REMINDER_PRESETS = [
     ("Выключено", None),
     ("Раз в день — 12:00", "12:00"),

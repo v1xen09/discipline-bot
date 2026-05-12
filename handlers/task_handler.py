@@ -1,19 +1,3 @@
-"""
-Task management commands:
-  /task <title> [| YYYY-MM-DD]  — add task
-  /tasks                         — list active tasks (с инлайн-кнопками)
-  /done <id>                     — mark task complete (legacy, fallback)
-  /overdue                       — list overdue tasks
-  /streak                        — show streaks
-
-Управление задачами в основном идёт через inline-кнопки под каждой карточкой:
-  ✅ Выполнить   — отмечает задачу выполненной
-  🗑 Удалить     — удаляет задачу из списка
-
-Кнопки добавляются: (а) под каждой задачей в /tasks, (б) под подтверждением
-после /task. callback_data в формате "task:done:<id>" / "task:delete:<id>".
-"""
-
 import logging
 import re
 from datetime import date

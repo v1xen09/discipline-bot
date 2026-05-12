@@ -1,8 +1,3 @@
-"""
-Speech-to-text через faster-whisper (локальная модель).
-Модель кешируется при первом вызове.
-"""
-
 import asyncio
 import logging
 import os
@@ -14,13 +9,11 @@ log = logging.getLogger(__name__)
 
 
 class WhisperVoiceHandler:
-    """Распознавание через faster-whisper. Модель грузится лениво при первом вызове."""
-
     def __init__(self, config: Config) -> None:
         self.model_size = config.WHISPER_MODEL_SIZE
         self.device = config.WHISPER_DEVICE
         self.compute_type = config.WHISPER_COMPUTE_TYPE
-        self._model = None  # lazy load
+        self._model = None
 
     def _ensure_model(self):
         if self._model is None:
