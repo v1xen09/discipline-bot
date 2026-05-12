@@ -110,6 +110,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         "time": it.get("time"),
                         "task": it["task"],
                         "description": it.get("description", ""),
+                        "task_type": it.get("type", "task"),
                     })
             if items:
                 deleted, added = await db.replace_week_schedule_tasks(

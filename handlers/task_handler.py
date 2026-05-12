@@ -117,7 +117,8 @@ def _format_task_card(task: dict, today: str) -> str:
 
 
 def _format_tasks_page(tasks: list[dict], page: int, today: str) -> str:
-    """HTML страницы — заголовок и до PAGE_SIZE задач с нумерацией."""
+    """HTML страницы — заголовок и до PAGE_SIZE задач.
+    Задачи (task) — жирным с номером, напоминания (reminder) — обычным текстом без номера."""
     total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
     start = page * PAGE_SIZE
     page_tasks = tasks[start:start + PAGE_SIZE]
@@ -127,40 +128,57 @@ def _format_tasks_page(tasks: list[dict], page: int, today: str) -> str:
         header += f"   <i>стр. {page + 1}/{total_pages}</i>"
 
     lines = [header, ""]
-    for i, t in enumerate(page_tasks, start=1):
+    task_num = 0
+    for t in page_tasks:
         due = t.get("due_date")
-        if due and due < today:
-            icon = "⚠️"
-        elif due and due == today:
-            icon = "📌"
+        time_part = f"  ⏰ {t['time']}" if t.get("time") else ""
+        if t.get("task_type") == "reminder":
+            line = f"{t.get('time', '') + ' ' if t.get('time') else ''}{t['title']}"
+            if due:
+                line += f"  <i>· до {due}</i>"
         else:
-            icon = "▫️"
-        p = PRIORITY_ICON.get(t.get("priority") or "", "")
-        line = f"<b>{i}.</b> {icon} {p} {t['title']}" if p else f"<b>{i}.</b> {icon} {t['title']}"
-        if t.get("time"):
-            line += f"  ⏰ {t['time']}"
-        if due:
-            line += f"  <i>· до {due}</i>"
-        if t.get("recurring"):
-            line += f"  🔄 {t['recurring']}"
+            task_num += 1
+            if due and due < today:
+                icon = "⚠️ "
+            elif due and due == today:
+                icon = "📌 "
+            else:
+                icon = ""
+            p = PRIORITY_ICON.get(t.get("priority") or "", "")
+            line = f"<b>{task_num}. {icon}{p + ' ' if p else ''}{t['title']}</b>"
+            line += time_part
+            if due:
+                line += f"  <i>· до {due}</i>"
+            if t.get("recurring"):
+                line += f"  🔄 {t['recurring']}"
         lines.append(line)
     return "\n".join(lines)
 
 
-def _tasks_page_keyboard(
-    tasks: list[dict], page: int
-) -> InlineKeyboardMarkup:
-    """Клавиатура страницы: ✅/{i} | …/{i} на задачу + навигация."""
+def _tasks_page_keyboard(tasks: list[dict], page: int) -> InlineKeyboardMarkup:
+    """✅-кнопки по 3 в ряд только для task-типа + единое «… Настроить» + навигация."""
     total_pages = max(1, (len(tasks) + PAGE_SIZE - 1) // PAGE_SIZE)
     start = page * PAGE_SIZE
     page_tasks = tasks[start:start + PAGE_SIZE]
 
     rows: list[list[InlineKeyboardButton]] = []
-    for i, t in enumerate(page_tasks, start=1):
-        rows.append([
-            InlineKeyboardButton(f"✅ {i}", callback_data=f"task:done:{t['id']}:{page}"),
-            InlineKeyboardButton(f"… {i}", callback_data=f"task:menu:{t['id']}:{page}"),
-        ])
+    done_row: list[InlineKeyboardButton] = []
+    task_num = 0
+    for t in page_tasks:
+        if t.get("task_type") == "reminder":
+            continue
+        task_num += 1
+        done_row.append(InlineKeyboardButton(
+            f"✅ {task_num}", callback_data=f"task:done:{t['id']}:{page}"
+        ))
+        if len(done_row) == 3:
+            rows.append(done_row)
+            done_row = []
+    if done_row:
+        rows.append(done_row)
+
+    if any(True for t in page_tasks):
+        rows.append([InlineKeyboardButton("… Настроить", callback_data=f"task:settings_menu:{page}")])
 
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
@@ -172,6 +190,23 @@ def _tasks_page_keyboard(
         rows.append(nav)
 
     rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _tasks_settings_menu_keyboard(page_tasks: list[dict], page: int) -> InlineKeyboardMarkup:
+    """Список задач страницы для выбора — открывает подменю конкретной задачи."""
+    rows: list[list[InlineKeyboardButton]] = []
+    task_num = 0
+    for t in page_tasks:
+        if t.get("task_type") != "reminder":
+            task_num += 1
+            label = f"{task_num}. {t['title']}"
+        else:
+            label = t["title"]
+        rows.append([InlineKeyboardButton(
+            label[:32], callback_data=f"task:pick:{t['id']}:{page}"
+        )])
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data=f"tasks:page:{page}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -375,6 +410,47 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             await _send_or_edit_tasks_page(
                 db, db_user["id"], page, target_message=query.message
             )
+        return
+
+    # ── Единое меню настройки задач страницы ──────────────────────────────
+    if parts[0] == "task" and len(parts) >= 3 and parts[1] == "settings_menu":
+        try:
+            page = int(parts[2])
+        except ValueError:
+            return
+        tasks = await db.get_tasks(db_user["id"])
+        start = page * PAGE_SIZE
+        page_tasks = tasks[start:start + PAGE_SIZE]
+        if not page_tasks:
+            await query.answer("Задач нет.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "Выбери задачу для настройки:",
+            reply_markup=_tasks_settings_menu_keyboard(page_tasks, page),
+        )
+        return
+
+    # ── Выбор конкретной задачи из меню настройки ─────────────────────────
+    if parts[0] == "task" and len(parts) >= 4 and parts[1] == "pick":
+        try:
+            task_id = int(parts[2])
+            page = int(parts[3])
+        except ValueError:
+            return
+        task = await db.get_task_by_id(task_id, db_user["id"])
+        if not task:
+            await query.answer("Задача не найдена.", show_alert=True)
+            return
+        reminder_info = ""
+        if task.get("notify_before"):
+            label = _REMIND_LABELS.get(task["notify_before"], f"{task['notify_before']} мин")
+            reminder_info = f"\n🔔 Напоминание: за {label}"
+        time_info = f"  ⏰ {task['time']}" if task.get("time") else ""
+        text = f"<b>{task['title']}</b>{time_info}{reminder_info}\n\nВыбери действие:"
+        await query.edit_message_text(
+            text, parse_mode="HTML",
+            reply_markup=_task_submenu_keyboard(task, page),
+        )
         return
 
     # ── Действия с задачей ─────────────────────────────────────────────────

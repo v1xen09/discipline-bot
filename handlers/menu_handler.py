@@ -53,6 +53,7 @@ async def handle_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
     ctx.user_data.pop("awaiting_city", None)
     ctx.user_data.pop("awaiting_note", None)
+    ctx.user_data.pop("awaiting_schedule_edit", None)
 
     db: Database = ctx.bot_data["db"]
     user = query.from_user

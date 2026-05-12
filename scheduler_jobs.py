@@ -29,8 +29,15 @@ def setup_scheduler(app: Application) -> AsyncIOScheduler:
         id="diary_synthesis",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _weekly_schedule_proposal_job,
+        CronTrigger(day_of_week="sun", hour=19, minute=0),
+        args=[app],
+        id="weekly_schedule_proposal",
+        replace_existing=True,
+    )
 
-    log.info("Scheduler set up: dispatcher every 1 min, diary synthesis at 23:30")
+    log.info("Scheduler set up: dispatcher every 1 min, diary synthesis at 23:30, weekly proposal on Sunday 19:00")
     return scheduler
 
 
@@ -234,6 +241,66 @@ async def _send_evening(app, tg_id, user_id, db, ai, personality) -> None:
         await app.bot.send_photo(
             tg_id, photo=io.BytesIO(month_png), caption=cap, parse_mode="HTML"
         )
+
+
+async def _weekly_schedule_proposal_job(app: Application) -> None:
+    """Каждое воскресенье в 19:00 предлагает готовое расписание на следующую неделю."""
+    from datetime import timedelta
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    db: Database = app.bot_data["db"]
+    ai: AIClient = app.bot_data["ai"]
+    user_ids = await db.get_all_user_ids()
+
+    today = date.today()
+    next_monday = today - timedelta(days=today.weekday()) + timedelta(weeks=1)
+    next_monday_iso = next_monday.isoformat()
+
+    for tg_id in user_ids:
+        try:
+            db_user = await db.get_user_by_telegram_id(tg_id)
+            if not db_user:
+                continue
+            user_id = db_user["id"]
+
+            if await db.has_scheduled_tasks_for_week(user_id, next_monday_iso):
+                continue
+
+            recent = await db.get_recent_schedules(user_id, limit=2)
+            if not recent:
+                continue
+
+            from handlers.schedule_handler import _build_schedule_history_context, _build_schedule_preview
+            context = await db.get_user_summary_context(tg_id)
+            context += "\n\n" + _build_schedule_history_context(recent)
+
+            schedule = ai.generate_schedule(
+                "на следующую неделю, основываясь на предыдущих расписаниях",
+                context=context,
+                target_monday=next_monday,
+            )
+            if "raw" in schedule:
+                log.warning("Weekly proposal: failed to parse schedule for user %d", tg_id)
+                continue
+
+            await db.save_schedule(user_id, next_monday_iso, schedule, keep_history=False)
+
+            preview = _build_schedule_preview(schedule, next_monday)
+            week_label = (
+                f"{next_monday.strftime('%d.%m')}–"
+                f"{(next_monday + timedelta(days=6)).strftime('%d.%m')}"
+            )
+            text = (
+                f"📅 <b>Я подготовил расписание на следующую неделю</b> ({week_label})!\n\n"
+                + preview
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Принять", callback_data=f"schedule_accept_proposal:{next_monday_iso}"),
+                InlineKeyboardButton("✏️ Изменить", callback_data=f"schedule_edit_proposal:{next_monday_iso}"),
+            ]])
+            await app.bot.send_message(tg_id, text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception as e:
+            log.warning("Weekly proposal failed for user %d: %s", tg_id, e)
 
 
 async def _diary_synthesis_job(app: Application) -> None:

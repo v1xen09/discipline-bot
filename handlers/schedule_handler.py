@@ -126,6 +126,7 @@ async def receive_schedule_request(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 "time": it.get("time"),
                 "task": it["task"],
                 "description": it.get("description", ""),
+                "task_type": it.get("type", "task"),
             })
     if not items:
         await update.message.reply_text(
@@ -241,6 +242,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     time=(it.get("time") or "").strip() or None,
                     source="schedule",
                     from_schedule=True,
+                    task_type=it.get("task_type", "task"),
                 )
                 added += 1
             ctx.user_data["last_schedule_monday"] = monday_date.isoformat()
@@ -322,6 +324,7 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     "time": it.get("time"),
                     "task": it["task"],
                     "description": it.get("description", ""),
+                    "task_type": it.get("type", "task"),
                 })
 
         deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday, items)
@@ -336,6 +339,54 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             f"Добавлено задач: <b>{added}</b>"
             + (f"\nЗаменено старых плановых: <b>{deleted}</b>" if deleted else ""),
             reply_markup=keyboard,
+        )
+        return
+
+    # ── Принять предложенное расписание ──────────────────────────────────
+    if data.startswith("schedule_accept_proposal:"):
+        week_start_iso = data[len("schedule_accept_proposal:"):]
+        try:
+            monday_date = date.fromisoformat(week_start_iso)
+        except ValueError:
+            await query.answer("Ошибка формата даты.", show_alert=True)
+            return
+        schedule_row = await db.get_schedule_for_week(db_user["id"], week_start_iso)
+        if not schedule_row:
+            await query.answer("Расписание не найдено.", show_alert=True)
+            return
+        schedule = schedule_row["schedule"]
+        items: list[dict] = []
+        for dk in DAY_KEYS:
+            for it in schedule.get(dk, []) or []:
+                if not (it.get("task") or "").strip():
+                    continue
+                items.append({
+                    "day": dk,
+                    "time": it.get("time"),
+                    "task": it["task"],
+                    "description": it.get("description", ""),
+                    "task_type": it.get("task_type", it.get("type", "task")),
+                })
+        deleted, added = await db.replace_week_schedule_tasks(db_user["id"], monday_date, items)
+        ctx.user_data["last_schedule_monday"] = week_start_iso
+        week_label = f"{monday_date.strftime('%d.%m')}–{(monday_date + timedelta(days=6)).strftime('%d.%m')}"
+        await query.edit_message_text(
+            f"✅ <b>Расписание на {week_label} принято!</b>\n"
+            f"Добавлено задач: <b>{added}</b>\n\n"
+            "Посмотреть: /myplan",
+            parse_mode="HTML",
+        )
+        return
+
+    # ── Изменить предложенное расписание ──────────────────────────────────
+    if data.startswith("schedule_edit_proposal:"):
+        week_start_iso = data[len("schedule_edit_proposal:"):]
+        ctx.user_data["awaiting_schedule_edit"] = week_start_iso
+        await query.edit_message_text(
+            "✏️ <b>Что изменить в расписании?</b>\n\n"
+            "Напиши пожелания, и я пересоставлю расписание.\n"
+            "Например: «Убери пробежку, добавь йогу утром»",
+            parse_mode="HTML",
         )
         return
 
@@ -361,6 +412,51 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
+        return
+
+    # ── Единое меню настройки задач дня ─────────────────────────────────
+    if data.startswith("myplan:settings_menu:"):
+        day_key = data.split(":", 2)[2]
+        if day_key not in DAY_NAMES:
+            return
+        monday_iso = ctx.user_data.get("myplan_week_monday") or (date.today() - timedelta(days=date.today().weekday())).isoformat()
+        monday = date.fromisoformat(monday_iso)
+        grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
+        all_items = list(grouped.get(day_key, []) or []) + list(grouped.get("undated", []) or [])
+        if not all_items:
+            await query.answer("Нет задач.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "Выбери задачу для настройки:",
+            reply_markup=_myplan_settings_menu_keyboard(all_items, day_key),
+        )
+        return
+
+    # ── Выбор конкретной задачи из меню настройки /myplan ────────────────
+    if data.startswith("myplan:pick:"):
+        parts = data.split(":", 3)
+        try:
+            task_id = int(parts[2])
+        except (IndexError, ValueError):
+            return
+        day_key = parts[3] if len(parts) > 3 else _today_key()
+        if day_key not in DAY_NAMES:
+            return
+        task = await db.get_task_by_id(task_id, db_user["id"])
+        if not task:
+            await query.answer("Задача не найдена.", show_alert=True)
+            return
+        reminder_info = ""
+        if task.get("notify_before"):
+            from handlers.task_handler import _REMIND_LABELS
+            label = _REMIND_LABELS.get(task["notify_before"], f"{task['notify_before']} мин")
+            reminder_info = f"\n🔔 Напоминание: за {label}"
+        time_info = f"  ⏰ {task['time']}" if task.get("time") else ""
+        text = f"<b>{task['title']}</b>{time_info}{reminder_info}\n\nВыбери действие:"
+        await query.edit_message_text(
+            text, parse_mode="HTML",
+            reply_markup=_myplan_submenu_keyboard(task, day_key),
+        )
         return
 
     # ── Подменю «…» из /myplan ───────────────────────────────────────────
@@ -578,19 +674,27 @@ def _format_day_from_tasks(grouped: dict, day_key: str, monday: date) -> str:
         undated = grouped.get("undated", []) or []
         if undated:
             lines += ["", "<b>Без даты:</b>"]
-            for i, t in enumerate(undated, start=1):
-                lines.append(_format_task_line(i, t, idx_offset=len(items)))
+            u_num = 0
+            for t in undated:
+                if t.get("task_type") != "reminder":
+                    u_num += 1
+                lines.append(_format_task_line(u_num, t))
         return "\n".join(lines)
 
-    for i, t in enumerate(items, start=1):
-        lines.append(_format_task_line(i, t))
+    task_num = 0
+    for t in items:
+        if t.get("task_type") != "reminder":
+            task_num += 1
+        lines.append(_format_task_line(task_num, t))
 
     # Блок задач без даты — внизу плана дня
     undated = grouped.get("undated", []) or []
     if undated:
         lines += ["", "<b>Без даты:</b>"]
-        for i, t in enumerate(undated, start=len(items) + 1):
-            lines.append(_format_task_line(i, t))
+        for t in undated:
+            if t.get("task_type") != "reminder":
+                task_num += 1
+            lines.append(_format_task_line(task_num, t))
 
     return "\n".join(lines)
 
@@ -599,13 +703,18 @@ _PRIORITY_ICON = {"high": "🔴", "medium": "🟡", "low": "🔵"}
 
 
 def _format_task_line(num: int, task: dict, idx_offset: int = 0) -> str:
-    """Одна строка задачи в плане."""
+    """Одна строка задачи в плане.
+    reminder — обычный текст без номера; task — жирный с номером."""
+    time_part = f"{task['time']} " if task.get("time") else ""
     if task.get("_done"):
-        time_part = f"{task['time']} " if task.get("time") else ""
         return f"<b>{num}.</b> ✅ <s>{time_part}{task['title']}</s>"
+    if task.get("task_type") == "reminder":
+        line = f"{time_part}{task['title']}"
+        if task.get("description"):
+            line += f"\n     <i>{task['description']}</i>"
+        return line
     bullet = "➕" if not task.get("from_schedule") else "▫️"
     p = _PRIORITY_ICON.get(task.get("priority") or "", "")
-    time_part = f"{task['time']} " if task.get("time") else ""
     line = f"<b>{num}.</b> {bullet}{p} {time_part}{task['title']}"
     if task.get("recurring"):
         line += f"  🔄 {task['recurring']}"
@@ -687,20 +796,47 @@ _MYPLAN_REMIND_LABELS = {
 }
 
 
+def _myplan_settings_menu_keyboard(all_items: list[dict], day_key: str) -> InlineKeyboardMarkup:
+    """Список задач дня для выбора задачи в подменю настроек."""
+    rows: list[list[InlineKeyboardButton]] = []
+    task_num = 0
+    for t in all_items:
+        if t.get("task_type") != "reminder":
+            task_num += 1
+            label = f"{task_num}. {t['title']}"
+        else:
+            label = t["title"]
+        rows.append([InlineKeyboardButton(
+            label[:32], callback_data=f"myplan:pick:{t['id']}:{day_key}"
+        )])
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data=f"schedule_day:{day_key}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _week_plan_keyboard(grouped: dict, day_key: str, monday: date) -> InlineKeyboardMarkup:
-    """Кнопки для дня: ✅/{i} | …/{i} на каждую задачу + переключатель Пн..Вс + навигация недель."""
+    """✅-кнопки по 3 в ряд (только task-тип) + единое «… Настроить» + навигация."""
     items = list(grouped.get(day_key, []) or [])
     undated = list(grouped.get("undated", []) or [])
     all_items = items + undated
 
     rows: list[list[InlineKeyboardButton]] = []
-    for i, t in enumerate(all_items, start=1):
-        if t.get("_done"):
+    done_row: list[InlineKeyboardButton] = []
+    task_num = 0
+    for t in all_items:
+        if t.get("_done") or t.get("task_type") == "reminder":
             continue
-        rows.append([
-            InlineKeyboardButton(f"✅ {i}", callback_data=f"myplan:done:{t['id']}:{day_key}"),
-            InlineKeyboardButton(f"… {i}", callback_data=f"myplan:menu:{t['id']}:{day_key}"),
-        ])
+        task_num += 1
+        done_row.append(InlineKeyboardButton(
+            f"✅ {task_num}", callback_data=f"myplan:done:{t['id']}:{day_key}"
+        ))
+        if len(done_row) == 3:
+            rows.append(done_row)
+            done_row = []
+    if done_row:
+        rows.append(done_row)
+
+    if all_items:
+        rows.append([InlineKeyboardButton("… Настроить", callback_data=f"myplan:settings_menu:{day_key}")])
 
     today = date.today()
     nav1: list[InlineKeyboardButton] = []
@@ -810,3 +946,51 @@ async def _render_week_plan(
 
 # _import_schedule_smart удалён — импорт больше не отдельный шаг.
 # Сгенерированный план сразу пишется в tasks через replace_week_schedule_tasks.
+
+
+def _build_schedule_history_context(recent_schedules: list[dict]) -> str:
+    """Компактный текст из предыдущих расписаний для передачи в AI."""
+    DAY_SHORT_LIST = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    lines = ["Предыдущие расписания (только названия):"]
+    for rec in recent_schedules:
+        week_start = rec["week_start"]
+        schedule = rec["schedule"]
+        day_parts = []
+        for i, dk in enumerate(DAY_KEYS):
+            items = schedule.get(dk) or []
+            if not items:
+                continue
+            titles = [
+                f"{it.get('task', '')}({'r' if it.get('task_type') == 'reminder' else 't'})"
+                for it in items if it.get("task")
+            ]
+            if titles:
+                day_parts.append(f"{DAY_SHORT_LIST[i]}: {', '.join(titles)}")
+        if day_parts:
+            lines.append(f"  Неделя {week_start}: " + "; ".join(day_parts))
+    return "\n".join(lines)
+
+
+def _build_schedule_preview(schedule: dict, monday: date) -> str:
+    """Превью расписания: первые 3 непустых дня, до 3 пунктов каждый."""
+    lines = []
+    days_shown = 0
+    for i, dk in enumerate(DAY_KEYS):
+        items = schedule.get(dk) or []
+        if not items:
+            continue
+        if days_shown >= 3:
+            remaining = sum(1 for d in DAY_KEYS[i:] if schedule.get(d))
+            if remaining:
+                lines.append(f"<i>… и ещё {remaining} дней</i>")
+            break
+        day_date = monday + timedelta(days=i)
+        lines.append(f"<b>{DAY_NAMES[dk]} {day_date.strftime('%d.%m')}:</b>")
+        for it in items[:3]:
+            prefix = "▫️" if it.get("type") != "reminder" else ""
+            time_part = f"{it.get('time')} " if it.get("time") else ""
+            lines.append(f"  {prefix}{time_part}{it.get('task', '')}")
+        if len(items) > 3:
+            lines.append(f"  <i>+{len(items) - 3} ещё</i>")
+        days_shown += 1
+    return "\n".join(lines)

@@ -125,6 +125,7 @@ class Database:
                 "ALTER TABLE users ADD COLUMN lat REAL DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN lon REAL DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN notify_weather INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'task'",
             ):
                 try:
                     await db.execute(stmt)
@@ -221,18 +222,21 @@ class Database:
         source: str = "manual",
         from_schedule: bool = False,
         priority: Optional[str] = None,
+        task_type: str = "task",
     ) -> int:
         valid_priorities = {"high", "medium", "low", None}
         if priority not in valid_priorities:
             priority = None
+        if task_type not in ("task", "reminder"):
+            task_type = "task"
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """INSERT INTO tasks
-                       (user_id, title, description, due_date, time, recurring, source, from_schedule, priority)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (user_id, title, description, due_date, time, recurring, source, from_schedule, priority, task_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id, title, description, due_date, time, recurring, source,
-                    1 if from_schedule else 0, priority,
+                    1 if from_schedule else 0, priority, task_type,
                 ),
             )
             await db.commit()
@@ -291,7 +295,7 @@ class Database:
 
             if save_snapshot:
                 cur = await db.execute(
-                    """SELECT title, description, due_date, time FROM tasks
+                    """SELECT title, description, due_date, time, task_type FROM tasks
                        WHERE user_id = ? AND from_schedule = 1 AND completed = 0
                          AND due_date BETWEEN ? AND ?""",
                     (user_id, monday_iso, sunday.isoformat()),
@@ -306,6 +310,7 @@ class Database:
                                 "task": t["title"],
                                 "time": t["time"],
                                 "description": t["description"] or "",
+                                "task_type": t.get("task_type", "task"),
                             })
                     except Exception:
                         pass
@@ -354,13 +359,16 @@ class Database:
                 due = (monday + timedelta(days=DAY_IDX[day_key])).isoformat()
                 time_val = (it.get("time") or "").strip() or None
                 desc = (it.get("description") or "").strip()
+                tt = (it.get("task_type") or "task").strip()
+                if tt not in ("task", "reminder"):
+                    tt = "task"
                 await db.execute(
                     """INSERT INTO tasks
-                           (user_id, title, description, due_date, time, source, from_schedule)
-                       VALUES (?, ?, ?, ?, ?, 'schedule', 1)""",
-                    (user_id, title, desc, due, time_val),
+                           (user_id, title, description, due_date, time, source, from_schedule, task_type)
+                       VALUES (?, ?, ?, ?, ?, 'schedule', 1, ?)""",
+                    (user_id, title, desc, due, time_val, tt),
                 )
-                new_snap[day_key].append({"task": title, "time": time_val, "description": desc})
+                new_snap[day_key].append({"task": title, "time": time_val, "description": desc, "task_type": tt})
                 added_n += 1
 
             if save_snapshot:
@@ -813,6 +821,47 @@ class Database:
             d["schedule"] = json.loads(d["schedule_json"])
             return d
 
+    async def get_schedule_for_week(self, user_id: int, week_start_iso: str) -> Optional[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM schedules WHERE user_id = ? AND week_start = ?",
+                (user_id, week_start_iso),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["schedule"] = json.loads(d["schedule_json"])
+            return d
+
+    async def get_recent_schedules(self, user_id: int, limit: int = 2) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT week_start, schedule_json FROM schedules
+                   WHERE user_id = ?
+                   ORDER BY week_start DESC LIMIT ?""",
+                (user_id, limit),
+            )
+            rows = await cur.fetchall()
+            return [
+                {"week_start": r["week_start"], "schedule": json.loads(r["schedule_json"])}
+                for r in rows
+            ]
+
+    async def has_scheduled_tasks_for_week(self, user_id: int, monday_iso: str) -> bool:
+        sunday_iso = (date.fromisoformat(monday_iso) + timedelta(days=6)).isoformat()
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                """SELECT 1 FROM tasks
+                   WHERE user_id = ? AND from_schedule = 1 AND completed = 0
+                     AND due_date BETWEEN ? AND ?
+                   LIMIT 1""",
+                (user_id, monday_iso, sunday_iso),
+            )
+            return (await cur.fetchone()) is not None
+
     async def _update_streak(self, task_id: int, user_id: int, today: str) -> None:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -1018,6 +1067,7 @@ class Database:
             cur = await db.execute(
                 """SELECT COUNT(*) FROM tasks
                    WHERE user_id = ?
+                     AND task_type = 'task'
                      AND (
                         due_date = ?
                         OR (recurring IS NOT NULL AND DATE(created_at) <= ?)
@@ -1031,6 +1081,7 @@ class Database:
                 """SELECT COUNT(*) FROM completions c
                    JOIN tasks t ON t.id = c.task_id
                    WHERE c.user_id = ? AND c.completed_on = ?
+                     AND t.task_type = 'task'
                      AND (t.due_date = ? OR t.recurring IS NOT NULL)""",
                 (user_id, day_iso, day_iso),
             )

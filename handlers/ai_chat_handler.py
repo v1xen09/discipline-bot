@@ -60,6 +60,43 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text("Текст заметки пустой — ничего не сохранил.")
         return
 
+    if ctx.user_data.get("awaiting_schedule_edit"):
+        from datetime import date as _date, timedelta as _timedelta
+        week_start_iso = ctx.user_data.pop("awaiting_schedule_edit")
+        db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
+        context = await db.get_user_summary_context(user.id)
+        try:
+            monday_date = _date.fromisoformat(week_start_iso)
+        except ValueError:
+            await update.message.reply_text("Ошибка — потерял дату расписания. Попробуй /schedule.")
+            return
+        schedule_row = await db.get_schedule_for_week(db_user["id"], week_start_iso)
+        if schedule_row:
+            from handlers.schedule_handler import _build_schedule_history_context
+            context += "\n\n" + _build_schedule_history_context(
+                [{"week_start": week_start_iso, "schedule": schedule_row["schedule"]}]
+            )
+        processing_msg = await update.message.reply_text("⏳ Перерабатываю расписание…")
+        schedule = ai.generate_schedule(update.message.text, context=context, target_monday=monday_date)
+        if "raw" in schedule:
+            await processing_msg.edit_text("Не смог разобрать ответ. Попробуй ещё раз.")
+            return
+        await db.save_schedule(db_user["id"], week_start_iso, schedule, keep_history=True)
+        from handlers.schedule_handler import _build_schedule_preview, DAY_NAMES
+        preview = _build_schedule_preview(schedule, monday_date)
+        week_label = f"{monday_date.strftime('%d.%m')}–{(monday_date + _timedelta(days=6)).strftime('%d.%m')}"
+        from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
+        keyboard = IKM([[
+            IKB("✅ Принять", callback_data=f"schedule_accept_proposal:{week_start_iso}"),
+            IKB("✏️ Изменить", callback_data=f"schedule_edit_proposal:{week_start_iso}"),
+        ]])
+        await processing_msg.edit_text(
+            f"📅 <b>Обновлённое расписание на {week_label}:</b>\n\n{preview}",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return
+
     db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
     context = await db.get_user_summary_context(user.id)
     personality = await db.get_personality(user.id)
@@ -189,6 +226,7 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                             "time": it.get("time"),
                             "task": it["task"],
                             "description": it.get("description", ""),
+                            "task_type": it.get("type", "task"),
                         })
                 if not items:
                     extra_lines.append(
