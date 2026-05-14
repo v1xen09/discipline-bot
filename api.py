@@ -28,6 +28,7 @@ CORS(flask_app)
 # In-memory auth state (reset on restart — acceptable for short-lived codes)
 _auth_codes: dict[int, tuple[str, float]] = {}  # telegram_id → (code, expires_at)
 _sessions: dict[str, int] = {}                  # token → db_user_id
+_code_attempts: dict[str, float] = {}           # ip → last_attempt_time
 
 _config = Config()
 _db = Database(_config.DATABASE_PATH)
@@ -98,6 +99,11 @@ async def _get_full_user(user_id: int) -> dict:
 
 @flask_app.route("/auth/request_code", methods=["POST"])
 async def request_code():
+    ip = request.remote_addr
+    if time.time() - _code_attempts.get(ip, 0.0) < 60:
+        return jsonify({"error": "Too many requests. Wait 1 minute."}), 429
+    _code_attempts[ip] = time.time()
+
     data = request.get_json(silent=True) or {}
     username = data.get("username", "")
     if not username:

@@ -36,8 +36,15 @@ def setup_scheduler(app: Application) -> AsyncIOScheduler:
         id="weekly_schedule_proposal",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _reset_reminded_job,
+        CronTrigger(hour=0, minute=1),
+        args=[app],
+        id="reset_reminded",
+        replace_existing=True,
+    )
 
-    log.info("Scheduler set up: dispatcher every 1 min, diary synthesis at 23:30, weekly proposal on Sunday 19:00")
+    log.info("Scheduler set up: dispatcher every 1 min, diary synthesis at 23:30, weekly proposal on Sunday 19:00, reminded reset at 00:01")
     return scheduler
 
 
@@ -301,6 +308,14 @@ async def _weekly_schedule_proposal_job(app: Application) -> None:
             await app.bot.send_message(tg_id, text, parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             log.warning("Weekly proposal failed for user %d: %s", tg_id, e)
+
+
+async def _reset_reminded_job(app: Application) -> None:
+    db: Database = app.bot_data["db"]
+    try:
+        await db.reset_reminded_for_recurring()
+    except Exception as e:
+        log.warning("reset_reminded_job failed: %s", e)
 
 
 async def _diary_synthesis_job(app: Application) -> None:

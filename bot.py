@@ -188,7 +188,7 @@ def main() -> None:
                 CallbackQueryHandler(schedule_week_selected, pattern=r"^schedule_week_select:"),
             ],
             AWAITING_SCHEDULE_REQUEST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_schedule_request)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, _with_user_lock(receive_schedule_request))
             ],
         },
         fallbacks=[],

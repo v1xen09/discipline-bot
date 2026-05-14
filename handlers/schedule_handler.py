@@ -1,16 +1,29 @@
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest as TgBadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from ai_client import AIClient
 from database import Database
 
 log = logging.getLogger(__name__)
+
+
+async def _safe_edit(message, text: str, **kwargs) -> None:
+    """Редактировать сообщение; при ошибке HTML-парсинга — повторить без тегов."""
+    try:
+        await message.edit_text(text, **kwargs)
+    except TgBadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            await message.edit_text(re.sub(r"<[^>]+>", "", text))
+        else:
+            raise
 
 AWAITING_SCHEDULE_WEEK = 0
 AWAITING_SCHEDULE_REQUEST = 1
@@ -947,7 +960,7 @@ async def _render_week_plan(
     text = _format_day_from_tasks(grouped, day_key, monday)
     keyboard = _week_plan_keyboard(grouped, day_key, monday)
     if target_message is not None:
-        await target_message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await _safe_edit(target_message, text, parse_mode="HTML", reply_markup=keyboard)
     else:
         await update.message.reply_html(text, reply_markup=keyboard)
 

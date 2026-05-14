@@ -1,7 +1,9 @@
 import logging
+import re
 from datetime import date, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest as TgBadRequest
 from telegram.ext import ContextTypes
 
 from ai_client import AIClient
@@ -12,18 +14,48 @@ log = logging.getLogger(__name__)
 _MAX_TG = 4096
 
 
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text)
+
+
 async def _send_final(processing_msg, text: str, parse_mode=None, reply_markup=None) -> None:
     if len(text) <= _MAX_TG:
-        await processing_msg.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        try:
+            await processing_msg.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except TgBadRequest as e:
+            if "can't parse entities" in str(e).lower():
+                await processing_msg.edit_text(_strip_html(text), reply_markup=reply_markup)
+            else:
+                raise
         return
     chunks = [text[i:i + _MAX_TG] for i in range(0, len(text), _MAX_TG)]
-    await processing_msg.edit_text(chunks[0], parse_mode=parse_mode)
     bot = processing_msg.get_bot()
+    try:
+        await processing_msg.edit_text(chunks[0], parse_mode=parse_mode)
+    except TgBadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            await processing_msg.edit_text(_strip_html(chunks[0]))
+        else:
+            raise
     for chunk in chunks[1:-1]:
-        await bot.send_message(processing_msg.chat_id, chunk, parse_mode=parse_mode)
-    await bot.send_message(
-        processing_msg.chat_id, chunks[-1], parse_mode=parse_mode, reply_markup=reply_markup
-    )
+        try:
+            await bot.send_message(processing_msg.chat_id, chunk, parse_mode=parse_mode)
+        except TgBadRequest as e:
+            if "can't parse entities" in str(e).lower():
+                await bot.send_message(processing_msg.chat_id, _strip_html(chunk))
+            else:
+                raise
+    try:
+        await bot.send_message(
+            processing_msg.chat_id, chunks[-1], parse_mode=parse_mode, reply_markup=reply_markup
+        )
+    except TgBadRequest as e:
+        if "can't parse entities" in str(e).lower():
+            await bot.send_message(
+                processing_msg.chat_id, _strip_html(chunks[-1]), reply_markup=reply_markup
+            )
+        else:
+            raise
 
 
 async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

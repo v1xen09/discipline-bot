@@ -1,6 +1,8 @@
 import logging
+import re
 
 from telegram import Update
+from telegram.error import BadRequest as TgBadRequest
 from telegram.ext import ContextTypes
 
 from ai_client import AIClient
@@ -133,7 +135,13 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         final_reply = "\n\n".join(p for p in reply_parts if p)
         if final_reply:
-            await update.message.reply_html(final_reply)
+            try:
+                await update.message.reply_html(final_reply)
+            except TgBadRequest as e:
+                if "can't parse entities" in str(e).lower():
+                    await update.message.reply_text(re.sub(r"<[^>]+>", "", final_reply))
+                else:
+                    raise
 
     except Exception as e:
         log.exception("Voice handler error: %s", e)

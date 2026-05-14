@@ -701,7 +701,8 @@ class Database:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT * FROM tasks
-                   WHERE user_id = ? AND remind_at = ? AND due_date = ?
+                   WHERE user_id = ? AND remind_at = ?
+                     AND (due_date = ? OR due_date IS NULL)
                      AND reminded = 0 AND completed = 0""",
                 (user_id, remind_at_hhmm, today_date),
             )
@@ -715,6 +716,13 @@ class Database:
             await db.execute(
                 f"UPDATE tasks SET reminded = 1 WHERE id IN ({placeholders})",
                 task_ids,
+            )
+            await db.commit()
+
+    async def reset_reminded_for_recurring(self) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE tasks SET reminded = 0 WHERE recurring IS NOT NULL OR due_date IS NULL"
             )
             await db.commit()
 

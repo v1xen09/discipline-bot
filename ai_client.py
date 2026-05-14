@@ -267,8 +267,7 @@ class AIClient:
 
         if not content:
             log.warning(
-                "LM Studio returned no usable content (finish=%s, raw_len=%d). "
-                "Снимок начала ответа: %r",
+                "LM Studio returned no usable content (finish=%s raw_len=%d) head=%r",
                 finish, len(raw), raw[:200],
             )
             content = (
@@ -310,6 +309,7 @@ class AIClient:
   состоит ровно из неё (и только в дни, где она уместна).
 
 ПРО НАЗВАНИЯ ЗАДАЧ:
+- Маркеры вида [id=N] в контексте — служебные. НЕ включай их в поле "task".
 - КОРОТКИЕ (1–3 слова), повторяющиеся для одной и той же привычки.
 - Одна привычка = ОДНО название. «Алгебра» во все дни недели; НЕ «Решить
   5 задач», «Прочитать главу» — это разные задачи, ломают учёт.
@@ -447,11 +447,7 @@ target_week_start: если пользователь указал конкрет
   "delete_note_ids": [3, 7],
   "schedule_request": "текст запроса на расписание или null",
   "schedule_week_offset": 0,
-  "schedule_changes": [
-    {{"op": "add",    "date": "YYYY-MM-DD", "time": "HH:MM", "task": "...", "description": "..."}},
-    {{"op": "remove", "date": "YYYY-MM-DD", "task": "Алгебра"}},
-    {{"op": "move",   "from_date": "YYYY-MM-DD", "to_date": "YYYY-MM-DD", "task": "Зарядка", "new_time": "08:00"}}
-  ],
+  "schedule_changes": [],
   "priority_changes": [{{"task_id": 5, "priority": "high|medium|low|null"}}],
   "reminder_changes": [{{"task_id": 5, "minutes": 30}}],
   "time_changes": [{{"task_id": 5, "time": "HH:MM или null"}}],
