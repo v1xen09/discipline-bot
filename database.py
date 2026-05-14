@@ -272,12 +272,12 @@ class Database:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT * FROM tasks
-                   WHERE user_id = ? AND completed = 0
+                   WHERE user_id = ?
                      AND (
                         (due_date BETWEEN ? AND ?)
                         OR due_date IS NULL
                      )
-                   ORDER BY (time IS NULL), time, from_schedule DESC, id""",
+                   ORDER BY completed ASC, (time IS NULL), time, from_schedule DESC, id""",
                 (user_id, monday.isoformat(), sunday.isoformat()),
             )
             rows = [dict(r) for r in await cur.fetchall()]
@@ -460,6 +460,30 @@ class Database:
 
         # Запись completion нужна для daily_stats даже без отображения стриков.
         return task
+
+    async def uncomplete_task(self, task_id: int, user_id: int) -> Optional[dict]:
+        """Снять отметку выполнения (только для non-recurring задач)."""
+        today = date.today().isoformat()
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM tasks WHERE id = ? AND user_id = ? AND completed = 1",
+                (task_id, user_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            task = dict(row)
+            await db.execute(
+                "UPDATE tasks SET completed = 0, completed_at = NULL WHERE id = ?",
+                (task_id,),
+            )
+            await db.execute(
+                "DELETE FROM completions WHERE task_id = ? AND completed_on = ?",
+                (task_id, today),
+            )
+            await db.commit()
+            return task
 
     async def find_active_task_by_title_exact(
         self, user_id: int, title: str

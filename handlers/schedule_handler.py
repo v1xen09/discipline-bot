@@ -566,24 +566,28 @@ async def handle_schedule_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         monday = _viewed_monday(ctx)
         grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
-
-        # Инжектируем выполненную задачу обратно с флагом _done для отображения
-        done_task = dict(task)
-        done_task["_done"] = True
-        task_due = done_task.get("due_date")
-        if task_due:
-            try:
-                d = date.fromisoformat(task_due)
-                offset = (d - monday).days
-                if 0 <= offset <= 6:
-                    grouped[DAY_KEYS[offset]].append(done_task)
-            except Exception:
-                pass
-        else:
-            grouped["undated"].append(done_task)
-
         await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
         await query.answer(f"✅ {task['title']}")
+        return
+
+    # ── Снять отметку выполнения из /myplan ──────────────────────────────
+    if data.startswith("myplan:undone:"):
+        parts = data.split(":", 3)
+        try:
+            task_id = int(parts[2])
+        except (IndexError, ValueError):
+            return
+        day_key = parts[3] if len(parts) > 3 else _today_key()
+
+        task = await db.uncomplete_task(task_id, db_user["id"])
+        if not task:
+            await query.answer("Задача не найдена или не была выполнена.", show_alert=True)
+            return
+
+        monday = _viewed_monday(ctx)
+        grouped = await db.get_week_tasks_grouped(db_user["id"], monday)
+        await _render_week_plan(grouped, monday, target_message=query.message, day_key=day_key)
+        await query.answer(f"↩ {task['title']}")
         return
 
     # ── Удаление из /myplan ───────────────────────────────────────────────
@@ -676,15 +680,13 @@ def _format_day_from_tasks(grouped: dict, day_key: str, monday: date) -> str:
             lines += ["", "<b>Без даты:</b>"]
             u_num = 0
             for t in undated:
-                if t.get("task_type") != "reminder":
-                    u_num += 1
+                u_num += 1
                 lines.append(_format_task_line(u_num, t))
         return "\n".join(lines)
 
     task_num = 0
     for t in items:
-        if t.get("task_type") != "reminder":
-            task_num += 1
+        task_num += 1
         lines.append(_format_task_line(task_num, t))
 
     # Блок задач без даты — внизу плана дня
@@ -692,8 +694,7 @@ def _format_day_from_tasks(grouped: dict, day_key: str, monday: date) -> str:
     if undated:
         lines += ["", "<b>Без даты:</b>"]
         for t in undated:
-            if t.get("task_type") != "reminder":
-                task_num += 1
+            task_num += 1
             lines.append(_format_task_line(task_num, t))
 
     return "\n".join(lines)
@@ -703,13 +704,17 @@ _PRIORITY_ICON = {"high": "🔴", "medium": "🟡", "low": "🔵"}
 
 
 def _format_task_line(num: int, task: dict, idx_offset: int = 0) -> str:
-    """Одна строка задачи в плане.
-    reminder — обычный текст без номера; task — жирный с номером."""
+    """Одна строка задачи в плане. Все задачи нумеруются.
+    reminder — обычный текст; task — жирный; completed — зачёркнутый."""
     time_part = f"{task['time']} " if task.get("time") else ""
+    # Выполненные задачи из БД
+    if task.get("completed"):
+        return f"{num}. ✅ <s>{time_part}{task['title']}</s>"
+    # Устаревший флаг из JSON-расписания (для обратной совместимости)
     if task.get("_done"):
-        return f"<b>{num}.</b> ✅ <s>{time_part}{task['title']}</s>"
+        return f"{num}. ✅ <s>{time_part}{task['title']}</s>"
     if task.get("task_type") == "reminder":
-        line = f"{time_part}{task['title']}"
+        line = f"{num}. {time_part}{task['title']}"
         if task.get("description"):
             line += f"\n     <i>{task['description']}</i>"
         return line
@@ -799,13 +804,9 @@ _MYPLAN_REMIND_LABELS = {
 def _myplan_settings_menu_keyboard(all_items: list[dict], day_key: str) -> InlineKeyboardMarkup:
     """Список задач дня для выбора задачи в подменю настроек."""
     rows: list[list[InlineKeyboardButton]] = []
-    task_num = 0
-    for t in all_items:
-        if t.get("task_type") != "reminder":
-            task_num += 1
-            label = f"{task_num}. {t['title']}"
-        else:
-            label = t["title"]
+    for i, t in enumerate(all_items, start=1):
+        done_mark = "✅ " if t.get("completed") else ""
+        label = f"{i}. {done_mark}{t['title']}"
         rows.append([InlineKeyboardButton(
             label[:32], callback_data=f"myplan:pick:{t['id']}:{day_key}"
         )])
@@ -821,13 +822,13 @@ def _week_plan_keyboard(grouped: dict, day_key: str, monday: date) -> InlineKeyb
 
     rows: list[list[InlineKeyboardButton]] = []
     done_row: list[InlineKeyboardButton] = []
-    task_num = 0
+    global_num = 0
     for t in all_items:
-        if t.get("_done") or t.get("task_type") == "reminder":
+        global_num += 1
+        if t.get("completed") or t.get("_done") or t.get("task_type") == "reminder":
             continue
-        task_num += 1
         done_row.append(InlineKeyboardButton(
-            f"✅ {task_num}", callback_data=f"myplan:done:{t['id']}:{day_key}"
+            f"✅ {global_num}", callback_data=f"myplan:done:{t['id']}:{day_key}"
         ))
         if len(done_row) == 3:
             rows.append(done_row)
@@ -875,7 +876,14 @@ def _myplan_submenu_keyboard(task: dict, day_key: str) -> InlineKeyboardMarkup:
     """Подменю «…» для задачи из /myplan."""
     task_id = task["id"]
     rows: list[list[InlineKeyboardButton]] = []
-    if task.get("time"):
+    if task.get("completed"):
+        rows.append([
+            InlineKeyboardButton("↩ Снять отметку", callback_data=f"myplan:undone:{task_id}:{day_key}"),
+        ])
+        rows.append([
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"myplan:delete:{task_id}:{day_key}"),
+        ])
+    elif task.get("time"):
         rows.append([
             InlineKeyboardButton(
                 "🔔 Напоминание",
