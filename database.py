@@ -273,10 +273,7 @@ class Database:
             cur = await db.execute(
                 """SELECT * FROM tasks
                    WHERE user_id = ?
-                     AND (
-                        (due_date BETWEEN ? AND ?)
-                        OR due_date IS NULL
-                     )
+                     AND due_date BETWEEN ? AND ?
                    ORDER BY completed ASC, (time IS NULL), time, from_schedule DESC, id""",
                 (user_id, monday.isoformat(), sunday.isoformat()),
             )
