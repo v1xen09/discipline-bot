@@ -20,6 +20,24 @@ import aiosqlite
 
 log = logging.getLogger(__name__)
 
+_REMINDER_KEYWORDS = {
+    "завтрак", "обед", "ужин", "перекус", "чай", "кофе",
+    "прогулка", "прогулку", "отдых", "перерыв", "пауза",
+    "сон", "медитация", "медитацию", "релакс",
+    "зарядка", "разминка", "растяжка",
+    "breakfast", "lunch", "dinner", "break", "rest", "walk", "sleep",
+}
+
+def _infer_task_type(title: str, ai_type: str) -> str:
+    """Если AI не указал reminder, проверяем по ключевым словам."""
+    if ai_type == "reminder":
+        return "reminder"
+    title_lower = title.strip().lower()
+    for kw in _REMINDER_KEYWORDS:
+        if title_lower == kw or title_lower.startswith(kw + " ") or title_lower.endswith(" " + kw):
+            return "reminder"
+    return "task"
+
 
 class Database:
     def __init__(self, path: str = "tmanager.db") -> None:
@@ -227,8 +245,7 @@ class Database:
         valid_priorities = {"high", "medium", "low", None}
         if priority not in valid_priorities:
             priority = None
-        if task_type not in ("task", "reminder"):
-            task_type = "task"
+        task_type = _infer_task_type(title, task_type)
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """INSERT INTO tasks
@@ -359,9 +376,7 @@ class Database:
                 due = (monday + timedelta(days=DAY_IDX[day_key])).isoformat()
                 time_val = (it.get("time") or "").strip() or None
                 desc = (it.get("description") or "").strip()
-                tt = (it.get("task_type") or "task").strip()
-                if tt not in ("task", "reminder"):
-                    tt = "task"
+                tt = _infer_task_type(title, (it.get("task_type") or "task").strip())
                 await db.execute(
                     """INSERT INTO tasks
                            (user_id, title, description, due_date, time, source, from_schedule, task_type)
