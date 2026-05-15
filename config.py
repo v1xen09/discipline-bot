@@ -1,4 +1,4 @@
-"""Configuration loaded from .env."""
+""".env."""
 
 import os
 from dataclasses import dataclass, field
@@ -32,7 +32,6 @@ class Config:
         default_factory=lambda: os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     )
 
-    # Ключ Яндекс.Погоды: https://developer.tech.yandex.ru/ → тестовый план (50 req/day).
     YANDEX_WEATHER_KEY: str = field(default_factory=lambda: os.getenv("YANDEX_WEATHER_KEY", "fa0f11a5-fd86-48c2-b07f-ef6e45a933a8"))
 
     DATABASE_PATH: str = field(default_factory=lambda: os.getenv("DATABASE_PATH", "tmanager.db"))

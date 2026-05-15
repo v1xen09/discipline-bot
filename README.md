@@ -1,278 +1,285 @@
-# TManager 📋
+# TManager
 
-Telegram-бот для управления задачами и продуктивностью с **локальным ИИ**.
-Никаких облачных API — вся LLM работает у тебя на компьютере через **LM Studio**,
-голос распознаётся локально через **faster-whisper**.
+![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+![LM Studio](https://img.shields.io/badge/LLM-LM%20Studio-purple)
+![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
+![Offline](https://img.shields.io/badge/works-100%25%20offline-brightgreen)
 
-Составляет недельные расписания, распознаёт голосовые сообщения, отслеживает
-серии выполненных дел, напоминает о просроченных задачах и мотивирует — с учётом
-истории пользователя.
+**Telegram-бот для задач и продуктивности. Работает полностью локально — никаких подписок, никакого облака.**
 
----
-
-## Возможности
-
-| Функция | Описание |
-|---|---|
-| 📅 Расписание | Локальная LLM составляет недельный план по словесному описанию |
-| 🎤 Голосовые | faster-whisper расшифровывает — бот добавляет задачи или составляет план |
-| 🔥 Серии | Отслеживает streak для каждой задачи, поздравляет на milestone'ах |
-| ⏰ Напоминания | Утренний и вечерний дайджест, напоминания о дедлайнах |
-| ⚠️ Просроченные | Проверка и мягкие напоминания о невыполненных делах |
-| 🧠 Память | ИИ ведёт дневник наблюдений о пользователе и использует его в ответах |
+LLM крутится у тебя на компьютере через LM Studio, голос распознаётся через faster-whisper. Начинал как простой трекер задач, сейчас умеет составлять расписания через ИИ, показывать графики продуктивности, ставить помодоро-таймеры и показывать погоду.
 
 ---
 
-## Команды бота
+## Что умеет
+
+**Задачи**
+- Добавлять задачи с дедлайном, временем и приоритетом
+- Отмечать выполненными (или «запретить выполнение» — для задач-привычек, которые повторяются каждый день)
+- Отслеживать streak: 3 дня подряд — 🌿, 7 — 🔥, 30 — 💎
+- Напоминать перед задачей если указано время
+
+**Расписание**
+- ИИ составляет недельный план по твоему описанию
+- Можно редактировать голосом или текстом: «перенеси зарядку с пятницы на четверг»
+- Большие изменения откатываются кнопкой ↩
+
+**Аналитика**
+- `/today` — сколько задач выполнено сегодня, AI комментирует
+- `/week` — диаграмма по дням недели
+- `/month` — календарная сетка месяца с цветными квадратами (как на GitHub)
+
+**Помодоро**
+- `/pomodoro` — запускает 25-минутный таймер, после предлагает перерыв
+- `/pomodoro 45` — если хочешь подольше
+- `/pomodoro stop` — остановить
+
+**Погода**
+- `/weather` — текущая погода по твоему городу (через Яндекс.Погоду)
+- Погода добавляется в утреннее уведомление автоматически, если задан город
+
+**Заметки**
+- `/note <текст>` — сохранить заметку
+- Или просто напиши «запомни, что...» — бот сам разберётся
+
+**Голос**
+- Отправь голосовое — faster-whisper расшифрует, бот добавит задачи или ответит
+
+**Характер бота**
+- В настройках можно переключить: мягкий, нейтральный, требовательный, игривый
+- ИИ ведёт дневник наблюдений о тебе и учитывает его в разговорах
+
+**Уведомления**
+- Утренний дайджест с погодой и планом на день
+- Вечерний итог
+- Напоминания за N минут до задачи (выбираешь сам: 10/15/30/60/90/120 мин)
+
+---
+
+## Команды
 
 ```
-/start         — регистрация и приветствие
-/help          — справка по командам
+/start         — создать аккаунт, приветствие
+/menu          — главное меню с кнопками
 /task <текст>  — добавить задачу
-/task Зарядка | daily       — ежедневная привычка
-/task Отчёт | 2025-12-31    — задача с дедлайном
+/task Зарядка | daily          — ежедневная привычка
+/task Отчёт | 2025-12-31       — с дедлайном
 /tasks         — список активных задач
-/done <id>     — отметить задачу выполненной
-/overdue       — просроченные задачи
-/schedule      — составить расписание на неделю
-/myplan        — показать текущее расписание
+/done <id>     — выполнено
+/overdue       — просроченные
+/schedule      — составить расписание (ИИ уточнит детали)
+/myplan        — посмотреть расписание на эту неделю
+/today         — итог дня
+/week          — диаграмма недели
+/month         — календарь месяца
+/pomodoro      — запустить помодоро (25 мин)
+/weather       — текущая погода
+/note <текст>  — сохранить заметку
 /streak        — серии выполненных задач
+/settings      — характер бота, уведомления, город
 ```
 
-Также можно просто написать боту текстом — он ответит с учётом твоего прогресса.
-Или отправить голосовое сообщение — бот распознает и извлечёт задачи.
+Или просто пиши текстом — ИИ разберётся.
 
 ---
 
-## Архитектура
+## Структура проекта
 
 ```
-bot.py                       — точка входа, регистрация хендлеров
-config.py                    — конфигурация (.env)
-database.py                  — SQLite: users, tasks, schedules, streaks, diary
-ai_client.py                 — клиент LM Studio: расписание, мотивация, память
-voice_handler.py             — faster-whisper: голос → текст
-scheduler_jobs.py            — APScheduler: утро/вечер/reminders
+bot.py                     — точка входа
+config.py                  — конфиг из .env
+database.py                — SQLite через aiosqlite
+ai_client.py               — клиент к LM Studio
+voice_handler.py           — faster-whisper
+scheduler_jobs.py          — утро/вечер/напоминания (APScheduler)
+analytics.py               — matplotlib: графики today/week/month
+api.py                     — REST API на Flask (для веб-интерфейса)
 handlers/
-  start_handler.py           — /start /help
-  schedule_handler.py        — /schedule /myplan
-  task_handler.py            — /task /tasks /done /overdue /streak
-  voice_message_handler.py   — голосовые сообщения
-  ai_chat_handler.py         — свободный диалог
+  start_handler.py         — /start /help
+  menu_handler.py          — кнопочное меню
+  task_handler.py          — задачи, стрики, напоминания
+  schedule_handler.py      — расписание
+  analytics_handler.py     — /today /week /month
+  notes_handler.py         — заметки
+  pomodoro_handler.py      — таймер
+  weather_handler.py       — погода
+  voice_message_handler.py — голосовые
+  ai_chat_handler.py       — свободный диалог
+  settings_handler.py      — настройки
+  admin_handler.py         — /admin (только для владельца)
 ```
 
 ---
 
-# Установка и запуск на Windows 10/11
+# Установка (Windows 10/11)
 
-> Весь процесс занимает 30–60 минут — основное время уходит на скачивание модели LM Studio.
-
----
-
-## Шаг 1 — Установка Python
-
-1. Открой **https://www.python.org/downloads/**
-2. Нажми кнопку **«Download Python 3.12.x»**
-3. Запусти скачанный установщик
-4. **ВАЖНО:** на первом экране поставь галочку **«Add Python to PATH»**
-5. Нажми **«Install Now»** и дождись завершения
-
-**Проверка:** открой `cmd` и введи:
-```
-python --version
-```
-Должно появиться `Python 3.12.x`.
+Минут 30-60, большую часть времени займёт скачивание модели.
 
 ---
 
-## Шаг 2 — Установка LM Studio
+## 1. Python
 
-LM Studio — бесплатное приложение, которое запускает большие языковые модели
-прямо на твоём компьютере. У него есть встроенный сервер с тем же API,
-что у OpenAI, поэтому код бота работает без изменений.
-
-1. Скачай LM Studio с **https://lmstudio.ai/**
-2. Установи и запусти
-3. На вкладке **Discover** (лупа в левом меню) найди и скачай модель.
-   Хорошие варианты для русского языка и инструкций:
-   - **Qwen3-8B** (`qwen/qwen3-8b`) — быстрая, нужно ≈8 ГБ памяти
-   - **Llama 3.1 8B Instruct** — нужно ≈8 ГБ памяти
-   - **Mistral Small** — нужно ≈14 ГБ памяти
-   Выбирай GGUF-версию с квантизацией Q4_K_M или Q5_K_M (баланс качества и скорости).
-4. После скачивания перейди на вкладку **Chat**, выбери модель сверху и
-   убедись, что она нормально отвечает на «Привет».
-5. Перейди на вкладку **Developer** (значок `</>`).
-6. Нажми **Start Server** — внизу должно появиться `Server running on http://localhost:1234`.
-7. Запомни **точное имя модели** — оно показано в шапке вкладки Developer.
-   Также его можно вытащить запросом:
-   ```
-   curl http://localhost:1234/v1/models
-   ```
-
-> Бот делает многошаговые вызовы LLM (расписание + чат + интенты).
-> Чем больше модель — тем точнее результат, но медленнее ответ.
-> Для CPU без GPU оптимально брать 7–8B с квантизацией Q4_K_M.
+1. Скачай Python 3.12 с **python.org/downloads**
+2. При установке обязательно поставь галочку **«Add Python to PATH»**
+3. Проверь: открой `cmd` и напиши `python --version`
 
 ---
 
-## Шаг 3 — Скачать код бота
+## 2. LM Studio
 
-Открой `cmd`, перейди в нужную папку и помести в неё файлы проекта (или склонируй репозиторий):
+LM Studio — это программа, которая запускает языковые модели локально. У неё встроенный сервер, совместимый с OpenAI API, поэтому бот просто к нему подключается.
+
+1. Скачай с **lmstudio.ai**, установи
+2. На вкладке **Discover** найди и скачай модель. Хорошо работают:
+   - **Qwen3-8B** — быстрая, ~8 ГБ памяти, хорошо понимает русский
+   - **Llama 3.1 8B Instruct** — тоже ~8 ГБ
+   - Бери GGUF с квантизацией **Q4_K_M** — баланс скорости и качества
+3. Перейди на вкладку **Developer** (значок `</>`)
+4. Нажми **Start Server** — должно написать `Server running on http://localhost:4321`
+5. Запомни точное имя модели — оно нужно для `.env`
+
+> Если ответы медленные — это нормально на CPU. Модели 7-8B с Q4_K_M терпимо работают даже без видеокарты.
+
+---
+
+## 3. Скачать код
+
+Просто положи файлы проекта в удобную папку, например:
 ```
-cd C:\Users\ИМЯ_ПОЛЬЗОВАТЕЛЯ\Documents\Claude\Projects\TManager
+C:\Users\ИМЯ\Documents\TManager
 ```
 
 ---
 
-## Шаг 4 — Виртуальное окружение
+## 4. Виртуальное окружение
 
+Открой `cmd`, перейди в папку проекта:
 ```
 python -m venv venv
 venv\Scripts\activate
 ```
 
-В начале строки должно появиться `(venv)` — окружение активно.
-**Все следующие команды выполняй только при активном окружении.**
+В начале строки должно появиться `(venv)`. Без этого дальше не идти.
+
+> Если в PowerShell не активируется — используй обычный `cmd`. Или в PowerShell выполни:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
 ---
 
-## Шаг 5 — Установка зависимостей
+## 5. Зависимости
 
 ```
 pip install -r requirements.txt
 ```
 
-Это поставит:
-- `python-telegram-bot` — клиент Telegram Bot API
-- `openai` — мы используем его как HTTP-клиент к LM Studio
-- `faster-whisper` — локальный Whisper (вместе с CTranslate2 и PyAV)
-- `aiosqlite`, `APScheduler`, `python-dotenv`
+Поставит: python-telegram-bot, openai (как HTTP-клиент к LM Studio), faster-whisper, matplotlib, aiosqlite, APScheduler, Flask, httpx, python-dotenv.
 
-> Если pip ругается на `av` (PyAV) — поставь Microsoft Visual C++ Redistributable
-> с https://aka.ms/vs/17/release/vc_redist.x64.exe и попробуй ещё раз.
+> Если ругается на `av` (PyAV) — скачай **Microsoft Visual C++ Redistributable** и попробуй снова.
 
 ---
 
-## Шаг 6 — Получение токена Telegram
+## 6. Токен Telegram
 
-1. Открой Telegram, найди **@BotFather**
-2. Напиши `/newbot`
-3. Введи имя бота (например `My TManager`)
-4. Введи username — должен заканчиваться на `bot` (например `my_tmanager_bot`)
-5. BotFather пришлёт токен вида `7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxx`
+1. Найди в Telegram **@BotFather**
+2. Напиши `/newbot`, придумай имя и username (должен заканчиваться на `bot`)
+3. Получишь токен вида `7123456789:AAHxxxxxxxx...`
 
 ---
 
-## Шаг 7 — Настройка .env
+## 7. Файл .env
 
-Скопируй шаблон конфигурации:
+Скопируй шаблон:
 ```
 copy .env.example .env
 ```
 
-Открой `.env` в Блокноте и заполни:
+Открой `.env` и заполни:
 
 ```env
 TELEGRAM_TOKEN=7123456789:AAHxxxxxxxxxxxxxxxxxxxxxxxx
 
-LMSTUDIO_BASE_URL=http://localhost:1234/v1
-LMSTUDIO_MODEL=qwen/qwen3-8b          # ← сюда точное имя модели из LM Studio
+LMSTUDIO_BASE_URL=http://localhost:4321/v1
+LMSTUDIO_MODEL=qwen/qwen3-8b        # точное имя из LM Studio
 
-WHISPER_MODEL_SIZE=small               # tiny / base / small / medium / large-v3
-WHISPER_DEVICE=cpu                     # cuda — если есть NVIDIA GPU
+WHISPER_MODEL_SIZE=small             # tiny / base / small / medium / large-v3
+WHISPER_DEVICE=cpu                   # cuda — если есть NVIDIA GPU
 WHISPER_COMPUTE_TYPE=int8
 
 DATABASE_PATH=tmanager.db
 BOT_NAME=TManager
 MORNING_MESSAGE_TIME=08:00
 EVENING_REVIEW_TIME=21:00
+
+# Яндекс.Погода (бесплатный тестовый ключ на 50 запросов/день):
+# YANDEX_WEATHER_KEY=твой_ключ
+
+# Твой Telegram ID (открывает /admin). Можно не заполнять.
+# ADMIN_TELEGRAM_ID=123456789
 ```
 
-> ВАЖНО: не помещай значения в кавычки и не оставляй пробелов вокруг `=`.
-> ВАЖНО: никому не отправляй файл `.env` — там твой токен Telegram.
+Без кавычек, без пробелов вокруг `=`. Файл `.env` никому не показывай — там токен бота.
 
 ---
 
-## Шаг 8 — Первый запуск
+## 8. Запуск
 
-Перед запуском бота **в LM Studio должна быть нажата кнопка Start Server** и
-загружена модель. Без этого бот при первом обращении к LLM получит ConnectionError.
+Сначала убедись, что в LM Studio нажата кнопка **Start Server** и модель загружена. Потом:
 
 ```
 python bot.py
 ```
 
-Лог должен выглядеть так:
+Лог при нормальном старте:
 ```
 [INFO] database: Database initialized at tmanager.db
-[INFO] scheduler_jobs: Scheduler set up: morning=08:00, evening=21:00, reminders every 30 min
-[INFO] bot: Scheduler started
+[INFO] scheduler_jobs: Scheduler set up: morning=08:00, evening=21:00
 [INFO] bot: TManager starting…
 ```
 
-При **первой** обработке голосового faster-whisper скачает модель Whisper
-с Hugging Face (~500 МБ для `small`). Дальше всё будет работать оффлайн.
+Открой Telegram, найди своего бота, напиши `/start`.
 
-Открой Telegram, найди своего бота и напиши `/start`.
+При первом голосовом сообщении faster-whisper скачает модель Whisper с Hugging Face (~500 МБ для `small`) — подожди немного, потом будет работать оффлайн.
 
-Останов бота — **Ctrl+C** в терминале.
+Остановить — **Ctrl+C**.
 
 ---
 
-## Шаг 9 — Автозапуск при старте Windows (опционально)
+## 9. Автозапуск (по желанию)
 
-Создай рядом с `bot.py` файл `start_tmanager.bat`:
+Создай файл `start_tmanager.bat` рядом с `bot.py`:
 ```bat
 @echo off
-cd /d C:\Users\ИМЯ_ПОЛЬЗОВАТЕЛЯ\Documents\Claude\Projects\TManager
+cd /d C:\Users\ИМЯ\Documents\TManager
 call venv\Scripts\activate
 python bot.py
 ```
 
-Нажми **Win + R**, введи `shell:startup`, скопируй туда `start_tmanager.bat`.
+Нажми **Win+R**, введи `shell:startup`, скопируй туда этот файл.
 
-> Не забудь, что сам LM Studio тоже должен быть запущен — иначе бот не получит
-> ответы от LLM. Включить автозапуск LM Studio можно в его настройках:
-> *Settings → Developer → Auto-start server on launch*, плюс добавить
-> сам LM Studio в автозагрузку Windows.
+LM Studio тоже нужно запускать вместе с Windows — в его настройках есть
+*Settings → Developer → Auto-start server on launch*, плюс добавь его в автозагрузку Windows.
 
 ---
 
 ## Решение проблем
 
-**`ConnectionRefusedError` или `httpx.ConnectError` при работе с ИИ**
-→ В LM Studio открыта вкладка Developer и нажата кнопка **Start Server**.
-→ Модель в LM Studio действительно загружена (показана в шапке Developer).
-→ В `.env` правильный `LMSTUDIO_BASE_URL` (по умолчанию `http://localhost:1234/v1`).
+**`ConnectionRefusedError` при работе с ИИ**
+→ В LM Studio нажата кнопка Start Server?
+→ Порт в `.env` совпадает с тем, что показывает LM Studio? По умолчанию `4321`.
 
-**Бот ругается, что модель не найдена**
-→ В `.env` имя `LMSTUDIO_MODEL` должно совпадать **символ в символ** с тем,
-   что показывает `curl http://localhost:1234/v1/models`.
+**Бот говорит, что модель не найдена**
+→ Имя в `LMSTUDIO_MODEL` должно совпадать символ в символ с тем, что показывает LM Studio. Можно проверить через `curl http://localhost:4321/v1/models`.
 
-**LLM отвечает текстом вокруг JSON, и расписание не парсится**
-→ Возьми модель помощнее или с лучшим следованием инструкциям (Qwen3, Llama 3.1).
-→ Для CPU удобнее размер 7–8B с квантизацией Q4_K_M.
+**ИИ отвечает нормально, но расписание не парсится**
+→ Модели поменьше иногда не следуют формату JSON. Попробуй Qwen3 или Llama 3.1 — они лучше с инструкциями.
 
-**Голосовые не распознаются / ошибка PyAV**
-→ Поставь Microsoft Visual C++ Redistributable
-   (https://aka.ms/vs/17/release/vc_redist.x64.exe).
-→ При первой расшифровке модель Whisper скачивается несколько минут — подожди.
-→ Можно уменьшить `WHISPER_MODEL_SIZE` до `base` или `tiny` (быстрее, менее точно).
+**Голосовые не работают / ошибка PyAV**
+→ Поставь Microsoft Visual C++ Redistributable.
+→ Первое голосовое идёт медленно — Whisper скачивается. Это один раз.
 
-**Очень медленные ответы**
-→ Это работа на CPU. Помогают: модель меньшего размера (3–4B),
-   жёсткая квантизация (Q4_0), GPU-оффлоадинг в LM Studio,
-   `WHISPER_DEVICE=cuda` для голоса (если есть NVIDIA GPU).
-
-**`(venv)` не появляется в PowerShell**
-→ Используй `cmd` вместо PowerShell, либо в PowerShell:
-  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+**Медленные ответы**
+→ Это CPU, так и должно быть. Помогает: модель поменьше (3-4B), квантизация Q4_0, или GPU-оффлоадинг в настройках LM Studio.
 
 **`ModuleNotFoundError`**
-→ Убедись, что виртуальное окружение активно (`(venv)` в начале строки).
-→ Запусти `pip install -r requirements.txt` ещё раз.
-
-**Бот не отвечает в Telegram**
-→ Проверь, что `python bot.py` запущен и в консоли нет красных ошибок.
-→ Токен в `.env` от @BotFather корректный.
-→ Напиши `/start` — он создаёт пользователя в БД.
+→ Виртуальное окружение активно? Должно быть `(venv)` в начале строки. Если нет — `venv\Scripts\activate`.

@@ -1,14 +1,3 @@
-"""
-Рисование графиков продуктивности через matplotlib.
-
-Стратегия:
-  • Backend «Agg» — не требует GUI и работает на Windows из-под службы.
-  • Все графики рендерятся в BytesIO и отдаются как PNG-байты;
-    handler'ы передают их в bot.send_photo(...).
-  • Цветовая шкала RdYlGn (красный → жёлтый → зелёный) — чтобы плохой день
-    сразу читался глазом.
-"""
-
 from __future__ import annotations
 
 import calendar
@@ -31,10 +20,8 @@ MONTH_NAMES_RU = [
 
 
 def _rate_color(rate: float | None):
-    """Цвет квадратика/столбика по коэффициенту 0..1.
-    None → серый (нет данных)."""
     if rate is None:
-        return (0.85, 0.85, 0.85, 1.0)
+        return 0.85, 0.85, 0.85, 1.0
     cmap = colormaps["RdYlGn"]
     return cmap(max(0.0, min(1.0, rate)))
 
@@ -49,14 +36,6 @@ def _save_png(fig) -> bytes:
 
 
 def render_week_chart(stats: list[dict], today: date) -> bytes:
-    """
-    7 столбиков с днями недели. Высота — процент выполнения.
-    Пунктирная горизонтальная линия на 50%.
-    Дни без планов рисуются серым штрихом.
-
-    stats: список из ровно 7 элементов — Пн..Вс — каждый dict с ключами
-           rate (None|0..1), planned, completed.
-    """
     fig, ax = plt.subplots(figsize=(8, 4.2))
 
     labels = []
@@ -124,15 +103,10 @@ def render_week_chart(stats: list[dict], today: date) -> bytes:
 
 
 def render_month_chart(stats: list[dict], today: date) -> bytes:
-    """
-    Календарная сетка 6×7 за месяц today. Каждый день — квадрат, цвет
-    по rate. Дни вне месяца — пустые. Сегодня обведён жирно.
-    """
     year = today.year
     month = today.month
     cal = calendar.Calendar(firstweekday=0)  # Пн = 0
 
-    # day_to_stat: 'YYYY-MM-DD' -> stat
     day_to_stat = {s["day"]: s for s in stats}
 
     weeks = list(cal.monthdayscalendar(year, month))  # 6×7 матрица, 0 = вне месяца
@@ -197,7 +171,6 @@ def render_month_chart(stats: list[dict], today: date) -> bytes:
 
 
 def render_today_chart(stat: dict) -> bytes:
-    """Простой горизонтальный «прогресс-бар» для итога дня."""
     rate = stat.get("rate")
     planned = stat.get("planned", 0)
     completed = stat.get("completed", 0)

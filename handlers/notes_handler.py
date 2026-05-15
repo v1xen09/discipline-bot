@@ -9,14 +9,12 @@ log = logging.getLogger(__name__)
 
 _BUTTON_MAX_LEN = 28  # символов для превью в кнопке
 
-
 def _note_preview(content: str) -> str:
     """Первые слова заметки, обрезанные до _BUTTON_MAX_LEN символов."""
     preview = content.strip().replace("\n", " ")
     if len(preview) > _BUTTON_MAX_LEN:
         preview = preview[:_BUTTON_MAX_LEN].rstrip() + "…"
     return preview
-
 
 def _list_keyboard(notes: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
@@ -30,7 +28,6 @@ def _list_keyboard(notes: list[dict]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
-
 def _detail_keyboard(note_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -39,7 +36,6 @@ def _detail_keyboard(note_id: int) -> InlineKeyboardMarkup:
         ],
     ])
 
-
 async def _render_list(notes: list[dict], *, update=None, target_message=None) -> None:
     text = f"📝 <b>Заметки</b> ({len(notes)})\n\nВыбери заметку:"
     keyboard = _list_keyboard(notes)
@@ -47,7 +43,6 @@ async def _render_list(notes: list[dict], *, update=None, target_message=None) -
         await target_message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     else:
         await update.message.reply_html(text, reply_markup=keyboard)
-
 
 async def _render_detail(note: dict, *, target_message) -> None:
     date_str = (note.get("created_at") or "")[:10]
@@ -60,9 +55,6 @@ async def _render_detail(note: dict, *, target_message) -> None:
         text, parse_mode="HTML", reply_markup=_detail_keyboard(note["id"])
     )
 
-
-# ── Публичный API для menu_handler ──────────────────────────────────────────
-
 async def _render_notes(
     notes: list[dict],
     *,
@@ -71,9 +63,6 @@ async def _render_notes(
 ) -> None:
     """Показать список заметок (используется из menu_handler и notes_command)."""
     await _render_list(notes, update=update, target_message=target_message)
-
-
-# ── Команды ──────────────────────────────────────────────────────────────────
 
 async def note_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
@@ -93,7 +82,6 @@ async def note_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await db.add_note(db_user["id"], text)
     await update.message.reply_html(f"📝 Сохранено\n\n<i>{text}</i>")
 
-
 async def notes_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
     user = update.effective_user
@@ -108,9 +96,6 @@ async def notes_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await _render_list(notes, update=update)
-
-
-# ── Callback handler ──────────────────────────────────────────────────────────
 
 async def handle_notes_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -129,7 +114,6 @@ async def handle_notes_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         return
     action = parts[1]
 
-    # ── Список ───────────────────────────────────────────────────────────────
     if action == "list":
         notes = await db.get_notes(db_user["id"])
         if not notes:
@@ -143,7 +127,6 @@ async def handle_notes_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             await _render_list(notes, target_message=query.message)
         return
 
-    # ── Просмотр карточки ─────────────────────────────────────────────────────
     if action == "view" and len(parts) >= 3:
         try:
             note_id = int(parts[2])
@@ -157,7 +140,6 @@ async def handle_notes_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         await _render_detail(note, target_message=query.message)
         return
 
-    # ── Удаление ──────────────────────────────────────────────────────────────
     if action == "delete" and len(parts) >= 3:
         try:
             note_id = int(parts[2])
@@ -179,7 +161,6 @@ async def handle_notes_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
             await _render_list(notes, target_message=query.message)
         return
 
-    # ── Новая заметка ─────────────────────────────────────────────────────────
     if action == "new":
         ctx.user_data["awaiting_note"] = True
         await query.edit_message_text(

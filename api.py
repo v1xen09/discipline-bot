@@ -1,5 +1,3 @@
-"""Flask async REST API for TManager Desktop client."""
-
 import asyncio
 import base64
 import logging
@@ -25,7 +23,6 @@ log = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 CORS(flask_app)
 
-# In-memory auth state (reset on restart — acceptable for short-lived codes)
 _auth_codes: dict[int, tuple[str, float]] = {}  # telegram_id → (code, expires_at)
 _sessions: dict[str, int] = {}                  # token → db_user_id
 _code_attempts: dict[str, float] = {}           # ip → last_attempt_time
@@ -34,7 +31,6 @@ _config = Config()
 _db = Database(_config.DATABASE_PATH)
 _ai: Optional[AIClient] = None
 _initialized = False
-
 
 @flask_app.before_request
 async def ensure_initialized() -> None:
@@ -47,9 +43,6 @@ async def ensure_initialized() -> None:
     except Exception as e:
         log.warning("AI init skipped: %s", e)
     _initialized = True
-
-
-# ─── Auth helpers ──────────────────────────────────────────────────────────────
 
 def require_auth(f):
     @wraps(f)
@@ -65,9 +58,7 @@ def require_auth(f):
         return await f(*args, **kwargs)
     return wrapper
 
-
 async def _find_user_by_input(raw: str) -> Optional[dict]:
-    """Find user by @username or numeric telegram_id string."""
     username = raw.lstrip("@").strip()
     async with aiosqlite.connect(_db.path) as conn:
         conn.row_factory = aiosqlite.Row
@@ -84,7 +75,6 @@ async def _find_user_by_input(raw: str) -> Optional[dict]:
         row = await cur.fetchone()
         return dict(row) if row else None
 
-
 async def _get_full_user(user_id: int) -> dict:
     async with aiosqlite.connect(_db.path) as conn:
         conn.row_factory = aiosqlite.Row
@@ -93,9 +83,6 @@ async def _get_full_user(user_id: int) -> dict:
         if not row:
             return {}
         return dict(row)
-
-
-# ─── Auth ──────────────────────────────────────────────────────────────────────
 
 @flask_app.route("/auth/request_code", methods=["POST"])
 async def request_code():
@@ -128,7 +115,6 @@ async def request_code():
 
     return jsonify({"ok": True})
 
-
 @flask_app.route("/auth/verify_code", methods=["POST"])
 async def verify_code():
     data = request.get_json(silent=True) or {}
@@ -156,15 +142,11 @@ async def verify_code():
     _sessions[token] = user["id"]
     return jsonify({"token": token, "user_id": user["id"]})
 
-
-# ─── Tasks ─────────────────────────────────────────────────────────────────────
-
 @flask_app.route("/tasks", methods=["GET"])
 @require_auth
 async def get_tasks():
     tasks = await _db.get_tasks(g.user_id)
     return jsonify({"tasks": tasks})
-
 
 @flask_app.route("/tasks", methods=["POST"])
 @require_auth
@@ -186,7 +168,6 @@ async def add_task():
     task = next((t for t in tasks if t["id"] == task_id), {"id": task_id, "title": title})
     return jsonify(task), 201
 
-
 @flask_app.route("/tasks/<int:task_id>/done", methods=["POST"])
 @require_auth
 async def complete_task(task_id):
@@ -194,7 +175,6 @@ async def complete_task(task_id):
     if not task:
         return jsonify({"error": "Task not found or already completed"}), 404
     return jsonify(task)
-
 
 @flask_app.route("/tasks/<int:task_id>", methods=["DELETE"])
 @require_auth
@@ -204,9 +184,6 @@ async def delete_task(task_id):
         return jsonify({"error": "Task not found"}), 404
     return jsonify(task)
 
-
-# ─── Schedule ──────────────────────────────────────────────────────────────────
-
 @flask_app.route("/schedule/week", methods=["GET"])
 @require_auth
 async def get_week_schedule():
@@ -215,15 +192,11 @@ async def get_week_schedule():
     grouped = await _db.get_week_tasks_grouped(g.user_id, monday)
     return jsonify({"week_start": monday.isoformat(), "days": grouped})
 
-
-# ─── Notes ─────────────────────────────────────────────────────────────────────
-
 @flask_app.route("/notes", methods=["GET"])
 @require_auth
 async def get_notes():
     notes = await _db.get_notes(g.user_id)
     return jsonify({"notes": notes})
-
 
 @flask_app.route("/notes", methods=["POST"])
 @require_auth
@@ -235,7 +208,6 @@ async def add_note():
     note_id = await _db.add_note(g.user_id, content)
     return jsonify({"id": note_id, "content": content}), 201
 
-
 @flask_app.route("/notes/<int:note_id>", methods=["DELETE"])
 @require_auth
 async def delete_note(note_id):
@@ -244,12 +216,8 @@ async def delete_note(note_id):
         return jsonify({"error": "Note not found"}), 404
     return jsonify({"ok": True})
 
-
-# ─── Analytics ─────────────────────────────────────────────────────────────────
-
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
-
 
 @flask_app.route("/analytics/today", methods=["GET"])
 @require_auth
@@ -259,7 +227,6 @@ async def analytics_today():
     png = await asyncio.to_thread(render_today_chart, stat)
     return jsonify({"png_base64": _b64(png), "stat": stat})
 
-
 @flask_app.route("/analytics/week", methods=["GET"])
 @require_auth
 async def analytics_week():
@@ -268,7 +235,6 @@ async def analytics_week():
     stats = await _db.daily_stats_range(g.user_id, monday, monday + timedelta(days=6))
     png = await asyncio.to_thread(render_week_chart, stats, today)
     return jsonify({"png_base64": _b64(png), "stats": stats})
-
 
 @flask_app.route("/analytics/month", methods=["GET"])
 @require_auth
@@ -282,9 +248,6 @@ async def analytics_month():
     stats = await _db.daily_stats_range(g.user_id, month_start, month_end)
     png = await asyncio.to_thread(render_month_chart, stats, today)
     return jsonify({"png_base64": _b64(png), "stats": stats})
-
-
-# ─── AI Chat ───────────────────────────────────────────────────────────────────
 
 @flask_app.route("/ai/chat", methods=["POST"])
 @require_auth

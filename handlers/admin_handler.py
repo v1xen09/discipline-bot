@@ -8,10 +8,8 @@ from database import Database
 
 log = logging.getLogger(__name__)
 
-
 def _is_admin(user_id: int, config: Config) -> bool:
     return config.ADMIN_TELEGRAM_ID != 0 and user_id == config.ADMIN_TELEGRAM_ID
-
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -24,7 +22,6 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄 Обновить статус",          callback_data="admin:open")],
         [InlineKeyboardButton("← Меню",                      callback_data="menu:main")],
     ])
-
 
 async def _panel_text(ctx: ContextTypes.DEFAULT_TYPE, tg_id: int) -> str:
     db: Database = ctx.bot_data["db"]
@@ -56,14 +53,12 @@ async def _panel_text(ctx: ContextTypes.DEFAULT_TYPE, tg_id: int) -> str:
         f"🤖 Модель: <code>{config.LMSTUDIO_MODEL}</code>"
     )
 
-
 async def admin_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = ctx.bot_data["config"]
     if not _is_admin(update.effective_user.id, config):
         return
     text = await _panel_text(ctx, update.effective_user.id)
     await update.message.reply_html(text, reply_markup=_admin_keyboard())
-
 
 async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -80,14 +75,10 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     tg_id = query.from_user.id
     action = query.data.split(":", 1)[1]
 
-    # ── Обновить панель ───────────────────────────────────────────────────────
-
     if action == "open":
         text = await _panel_text(ctx, tg_id)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
-
-    # ── Проверить погоду ──────────────────────────────────────────────────────
 
     if action == "weather":
         weather_client = ctx.bot_data.get("weather")
@@ -122,8 +113,6 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
 
-    # ── Утреннее сообщение ────────────────────────────────────────────────────
-
     if action == "morning":
         from scheduler_jobs import _send_morning
         db_user = await db.get_user_by_telegram_id(tg_id)
@@ -138,8 +127,6 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         text = f"{status}\n\n" + await _panel_text(ctx, tg_id)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
-
-    # ── Вечернее сообщение ────────────────────────────────────────────────────
 
     if action == "evening":
         from scheduler_jobs import _send_evening
@@ -156,8 +143,6 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
 
-    # ── Напоминание о задачах ─────────────────────────────────────────────────
-
     if action == "reminder":
         from scheduler_jobs import _send_reminder
         db_user = await db.get_user_by_telegram_id(tg_id)
@@ -171,8 +156,6 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         text = f"{status}\n\n" + await _panel_text(ctx, tg_id)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
-
-    # ── Синтез дневника ───────────────────────────────────────────────────────
 
     if action == "diary":
         db_user = await db.get_user_by_telegram_id(tg_id)
@@ -197,8 +180,6 @@ async def handle_admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         text = f"{status}\n\n" + await _panel_text(ctx, tg_id)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_keyboard())
         return
-
-    # ── Задать город ──────────────────────────────────────────────────────────
 
     if action == "set_city":
         ctx.user_data["awaiting_city"] = True

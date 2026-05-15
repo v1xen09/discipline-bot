@@ -1,13 +1,3 @@
-"""
-Команды просмотра аналитики продуктивности:
-  /today  — сегодняшний прогресс (текст + горизонтальная шкала)
-  /week   — диаграмма по дням недели (Пн..Вс)
-  /month  — календарная сетка месяца с цветовыми квадратами
-
-Каждая команда отправляет картинку (PNG) с короткой подписью. AI
-комментирует результат с учётом текущего «характера» бота.
-"""
-
 import io
 import logging
 from datetime import date, timedelta
@@ -22,15 +12,15 @@ from database import Database
 log = logging.getLogger(__name__)
 
 
-def _rate_caption(rate: float | None, completed: int, planned: int) -> str:
+def rate_caption(rate: float | None, completed: int, planned: int) -> str:
     if rate is None:
         return "Сегодня задач не было."
     pct = int(round(rate * 100))
     return f"{completed} из {planned} · {pct}%"
 
 
-def _rate_trigger(rate: float | None) -> str:
-    """Триггер для generate_motivation, чтобы он подобрал тон под результат."""
+def rate_trigger(rate: float | None) -> str:
+    """Триггер для generate_motivation, чтобы ИИ подобрал тон под результат."""
     if rate is None:
         return "evening"
     if rate >= 0.8:
@@ -50,7 +40,7 @@ async def today_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     stat = await db.daily_stats(db_user["id"], today)
     png = analytics.render_today_chart(stat)
 
-    caption = "📊 <b>Сегодня</b> · " + _rate_caption(
+    caption = "📊 <b>Сегодня</b> · " + rate_caption(
         stat["rate"], stat["completed"], stat["planned"]
     )
 
@@ -62,7 +52,7 @@ async def today_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             context + f"\n\nКоэффициент сегодня: "
                       f"{0 if stat['rate'] is None else int(round(stat['rate'] * 100))}% "
                       f"({stat['completed']} из {stat['planned']}).",
-            trigger=_rate_trigger(stat["rate"]),
+            trigger=rate_trigger(stat["rate"]),
             personality=personality,
         )
         if comment:

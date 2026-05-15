@@ -1,9 +1,11 @@
 import logging
 from datetime import date, datetime
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from telegram import Bot
 from telegram.ext import Application
 
 from ai_client import AIClient
@@ -12,7 +14,7 @@ from database import Database
 log = logging.getLogger(__name__)
 
 
-def setup_scheduler(app: Application) -> AsyncIOScheduler:
+def setup_scheduler(app: Application[Bot, Any, Any, Any, Any, Any]) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
     scheduler.add_job(
@@ -48,7 +50,7 @@ def setup_scheduler(app: Application) -> AsyncIOScheduler:
     return scheduler
 
 
-async def _notification_dispatcher(app: Application) -> None:
+async def _notification_dispatcher(app: Application[Bot, Any, Any, Any, Any, Any]) -> None:
     now = datetime.now().strftime("%H:%M")
     today = date.today().isoformat()
 
@@ -200,7 +202,7 @@ async def _send_evening(app, tg_id, user_id, db, ai, personality) -> None:
     from datetime import timedelta
 
     import analytics
-    from handlers.analytics_handler import _rate_caption, _rate_trigger
+    from handlers.analytics_handler import rate_caption, rate_trigger
 
     today = date.today()
     context = await db.get_user_summary_context(tg_id)
@@ -210,13 +212,13 @@ async def _send_evening(app, tg_id, user_id, db, ai, personality) -> None:
         context + f"\n\nКоэффициент сегодня: "
                   f"{0 if stat['rate'] is None else int(round(stat['rate'] * 100))}% "
                   f"({stat['completed']} из {stat['planned']}).",
-        trigger=_rate_trigger(stat["rate"]),
+        trigger=rate_trigger(stat["rate"]),
         personality=personality,
     )
 
     caption = (
         "🌙 <b>Итог дня</b> · "
-        + _rate_caption(stat["rate"], stat["completed"], stat["planned"])
+        + rate_caption(stat["rate"], stat["completed"], stat["planned"])
         + (f"\n\n{comment}" if comment else "")
     )
 
@@ -250,7 +252,7 @@ async def _send_evening(app, tg_id, user_id, db, ai, personality) -> None:
         )
 
 
-async def _weekly_schedule_proposal_job(app: Application) -> None:
+async def _weekly_schedule_proposal_job(app: Application[Bot, Any, Any, Any, Any, Any]) -> None:
     """Каждое воскресенье в 19:00 предлагает готовое расписание на следующую неделю."""
     from datetime import timedelta
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -277,9 +279,9 @@ async def _weekly_schedule_proposal_job(app: Application) -> None:
             if not recent:
                 continue
 
-            from handlers.schedule_handler import _build_schedule_history_context, _build_schedule_preview
+            from handlers.schedule_handler import build_schedule_history_context, build_schedule_preview
             context = await db.get_user_summary_context(tg_id)
-            context += "\n\n" + _build_schedule_history_context(recent)
+            context += "\n\n" + build_schedule_history_context(recent)
 
             schedule = ai.generate_schedule(
                 "на следующую неделю, основываясь на предыдущих расписаниях",
@@ -292,7 +294,7 @@ async def _weekly_schedule_proposal_job(app: Application) -> None:
 
             await db.save_schedule(user_id, next_monday_iso, schedule, keep_history=False)
 
-            preview = _build_schedule_preview(schedule, next_monday)
+            preview = build_schedule_preview(schedule, next_monday)
             week_label = (
                 f"{next_monday.strftime('%d.%m')}–"
                 f"{(next_monday + timedelta(days=6)).strftime('%d.%m')}"
@@ -310,7 +312,7 @@ async def _weekly_schedule_proposal_job(app: Application) -> None:
             log.warning("Weekly proposal failed for user %d: %s", tg_id, e)
 
 
-async def _reset_reminded_job(app: Application) -> None:
+async def _reset_reminded_job(app: Application[Bot, Any, Any, Any, Any, Any]) -> None:
     db: Database = app.bot_data["db"]
     try:
         await db.reset_reminded_for_recurring()
@@ -318,7 +320,7 @@ async def _reset_reminded_job(app: Application) -> None:
         log.warning("reset_reminded_job failed: %s", e)
 
 
-async def _diary_synthesis_job(app: Application) -> None:
+async def _diary_synthesis_job(app: Application[Bot, Any, Any, Any, Any, Any]) -> None:
     db: Database = app.bot_data["db"]
     ai: AIClient = app.bot_data["ai"]
     user_ids = await db.get_all_user_ids()

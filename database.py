@@ -1,16 +1,3 @@
-"""
-Database layer for TManager.
-Uses SQLite via aiosqlite for async access.
-
-Tables:
-    users       — registered Telegram users + their timezone
-    tasks       — individual tasks/habits with deadlines
-    schedules   — AI-generated weekly schedules (stored as JSON)
-    streaks     — per-task streak counters
-    diary       — AI observations about the user (memory system)
-    completions — log of every task completion (for streak math)
-"""
-
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -124,9 +111,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_completions_user ON completions(user_id, completed_on);
                 CREATE INDEX IF NOT EXISTS idx_notes_user       ON notes(user_id, created_at DESC);
             """)
-            # Лёгкие миграции для уже существующих БД — CREATE IF NOT EXISTS не
-            # добавляет новые столбцы. Пробуем добавить, ловим OperationalError
-            # если столбец уже есть.
+
             for stmt in (
                 "ALTER TABLE users ADD COLUMN personality TEXT NOT NULL DEFAULT 'soft'",
                 "ALTER TABLE schedules ADD COLUMN previous_json TEXT",
@@ -144,11 +129,16 @@ class Database:
                 "ALTER TABLE users ADD COLUMN lon REAL DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN notify_weather INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'task'",
+                "ALTER TABLE tasks ADD COLUMN no_complete INTEGER NOT NULL DEFAULT 0",
             ):
                 try:
                     await db.execute(stmt)
-                except Exception:
-                    pass  # столбец уже есть
+                except aiosqlite.OperationalError:
+                    pass
+            # Recurring tasks should never be reminders — fix any misclassified rows.
+            await db.execute(
+                "UPDATE tasks SET task_type = 'task' WHERE recurring IS NOT NULL AND task_type = 'reminder'"
+            )
             await db.commit()
         log.info("Database initialized at %s", self.path)
 
@@ -246,6 +236,8 @@ class Database:
         if priority not in valid_priorities:
             priority = None
         task_type = _infer_task_type(title, task_type)
+        if recurring:
+            task_type = "task"
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
                 """INSERT INTO tasks
@@ -262,23 +254,37 @@ class Database:
     async def get_week_tasks_grouped(
         self, user_id: int, monday: date
     ) -> dict[str, list[dict]]:
-        DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
+        day_keys = ["monday", "tuesday", "wednesday", "thursday",
                     "friday", "saturday", "sunday"]
-        out: dict[str, list[dict]] = {k: [] for k in DAY_KEYS}
+        out: dict[str, list[dict]] = {k: [] for k in day_keys}
         out["undated"] = []
 
         sunday = monday + timedelta(days=6)
+        monday_iso = monday.isoformat()
+        sunday_iso = sunday.isoformat()
+
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT * FROM tasks
                    WHERE user_id = ?
-                     AND due_date BETWEEN ? AND ?
+                     AND (due_date BETWEEN ? AND ? OR (due_date IS NULL AND completed = 0))
+                     AND (recurring IS NULL OR recurring = '')
                    ORDER BY completed ASC, (time IS NULL), time, from_schedule DESC, id""",
-                (user_id, monday.isoformat(), sunday.isoformat()),
+                (user_id, monday_iso, sunday_iso),
             )
             rows = [dict(r) for r in await cur.fetchall()]
 
+            cur2 = await db.execute(
+                """SELECT * FROM tasks
+                   WHERE user_id = ? AND recurring IS NOT NULL AND completed = 0
+                     AND DATE(created_at) <= ?
+                   ORDER BY (time IS NULL), time, id""",
+                (user_id, sunday_iso),
+            )
+            recurring_rows = [dict(r) for r in await cur2.fetchall()]
+
+        dated_ids: set[int] = set()
         for t in rows:
             due = t.get("due_date")
             if not due:
@@ -286,11 +292,43 @@ class Database:
                 continue
             try:
                 d = date.fromisoformat(due)
-            except Exception:
+            except ValueError:
                 continue
             offset = (d - monday).days
             if 0 <= offset <= 6:
-                out[DAY_KEYS[offset]].append(t)
+                dated_ids.add(int(t["id"]))
+                out[day_keys[offset]].append(t)
+
+        for t in recurring_rows:
+            if int(t["id"]) in dated_ids:
+                continue
+            rec = (t.get("recurring") or "").lower()
+            try:
+                created = date.fromisoformat((t.get("created_at") or monday_iso)[:10])
+            except ValueError:
+                created = monday
+
+            if rec == "daily":
+                for i, day_key in enumerate(day_keys):
+                    if created <= monday + timedelta(days=i):
+                        out[day_key].append(t)
+            elif rec == "workdays":
+                for i, day_key in enumerate(day_keys[:5]):
+                    if created <= monday + timedelta(days=i):
+                        out[day_key].append(t)
+            elif rec == "weekly":
+                due = t.get("due_date")
+                if due:
+                    try:
+                        weekday = date.fromisoformat(due).weekday()
+                        day = monday + timedelta(days=weekday)
+                        if created <= day:
+                            out[day_keys[weekday]].append(t)
+                    except ValueError:
+                        out["undated"].append(t)
+                else:
+                    out["undated"].append(t)
+
         return out
 
     async def replace_week_schedule_tasks(
@@ -298,9 +336,9 @@ class Database:
         save_snapshot: bool = True,
     ) -> tuple[int, int]:
         """Атомарно заменяет плановые задачи недели. save_snapshot=False используется undo, чтобы не затирать точку отката."""
-        DAY_IDX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        day_idx = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
                    "friday": 4, "saturday": 5, "sunday": 6}
-        IDX_DAY = {v: k for k, v in DAY_IDX.items()}
+        idx_day = {v: k for k, v in day_idx.items()}
         sunday = monday + timedelta(days=6)
         monday_iso = monday.isoformat()
 
@@ -315,18 +353,18 @@ class Database:
                     (user_id, monday_iso, sunday.isoformat()),
                 )
                 prev_tasks = [dict(r) for r in await cur.fetchall()]
-                prev_snap: dict = {k: [] for k in DAY_IDX}
+                prev_snap: dict = {k: [] for k in day_idx}
                 for t in prev_tasks:
                     try:
                         offset = (date.fromisoformat(t["due_date"]) - monday).days
                         if 0 <= offset <= 6:
-                            prev_snap[IDX_DAY[offset]].append({
+                            prev_snap[idx_day[offset]].append({
                                 "task": t["title"],
                                 "time": t["time"],
                                 "description": t["description"] or "",
                                 "task_type": t.get("task_type", "task"),
                             })
-                    except Exception:
+                    except ValueError:
                         pass
                 prev_json = json.dumps(prev_snap, ensure_ascii=False)
 
@@ -361,16 +399,16 @@ class Database:
             )
             deleted_n = cur.rowcount or 0
 
-            new_snap: dict = {k: [] for k in DAY_IDX}
+            new_snap: dict = {k: [] for k in day_idx}
             added_n = 0
             for it in items:
                 day_key = (it.get("day") or "").lower()
-                if day_key not in DAY_IDX:
+                if day_key not in day_idx:
                     continue
                 title = (it.get("task") or "").strip()
                 if not title:
                     continue
-                due = (monday + timedelta(days=DAY_IDX[day_key])).isoformat()
+                due = (monday + timedelta(days=day_idx[day_key])).isoformat()
                 time_val = (it.get("time") or "").strip() or None
                 desc = (it.get("description") or "").strip()
                 tt = _infer_task_type(title, (it.get("task_type") or "task").strip())
@@ -399,20 +437,29 @@ class Database:
         include_completed: bool = False,
         due_before: Optional[str] = None,
     ) -> list[dict]:
+        today = date.today().isoformat()
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
-            query = "SELECT * FROM tasks WHERE user_id = ?"
-            params: list = [user_id]
+            query = """
+                SELECT tasks.*,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM completions
+                        WHERE completions.task_id = tasks.id AND completions.completed_on = ?
+                    ) THEN 1 ELSE 0 END AS completed_today
+                FROM tasks
+                WHERE tasks.user_id = ?
+            """
+            params: list = [today, user_id]
             if not include_completed:
-                query += " AND completed = 0"
+                query += " AND tasks.completed = 0"
             if due_before:
-                query += " AND (due_date IS NULL OR due_date <= ?)"
+                query += " AND (tasks.due_date IS NULL OR tasks.due_date <= ?)"
                 params.append(due_before)
             query += (
                 " ORDER BY"
-                " CASE priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 4 ELSE 3 END,"
-                " CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,"
-                " due_date ASC, created_at ASC"
+                " CASE tasks.priority WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 4 ELSE 3 END,"
+                " CASE WHEN tasks.due_date IS NULL THEN 1 ELSE 0 END,"
+                " tasks.due_date ASC, tasks.created_at ASC"
             )
             cur = await db.execute(query, params)
             return [dict(r) for r in await cur.fetchall()]
@@ -457,6 +504,28 @@ class Database:
 
         # Запись completion нужна для daily_stats даже без отображения стриков.
         return task
+
+    async def toggle_task_no_complete(self, task_id: int, user_id: int) -> Optional[dict]:
+        """Переключить флаг no_complete. Возвращает обновлённую задачу."""
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+                (task_id, user_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return None
+            new_val = 0 if row["no_complete"] else 1
+            await db.execute(
+                "UPDATE tasks SET no_complete = ? WHERE id = ?",
+                (new_val, task_id),
+            )
+            await db.commit()
+            cur2 = await db.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            )
+            return dict(await cur2.fetchone())
 
     async def uncomplete_task(self, task_id: int, user_id: int) -> Optional[dict]:
         """Снять отметку выполнения (только для non-recurring задач)."""
@@ -547,10 +616,17 @@ class Database:
             return task
 
     async def get_task_by_id(self, task_id: int, user_id: int) -> Optional[dict]:
+        today = date.today().isoformat()
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT * FROM tasks WHERE id = ? AND user_id = ?", (task_id, user_id)
+                """SELECT tasks.*,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM completions
+                        WHERE completions.task_id = tasks.id AND completions.completed_on = ?
+                    ) THEN 1 ELSE 0 END AS completed_today
+                FROM tasks WHERE tasks.id = ? AND tasks.user_id = ?""",
+                (today, task_id, user_id),
             )
             row = await cur.fetchone()
             return dict(row) if row else None
@@ -633,6 +709,7 @@ class Database:
                 """SELECT * FROM tasks
                    WHERE user_id = ? AND completed = 0
                      AND due_date IS NOT NULL AND due_date < ?
+                     AND (no_complete IS NULL OR no_complete = 0)
                    ORDER BY due_date ASC""",
                 (user_id, today),
             )
@@ -826,6 +903,52 @@ class Database:
                        ON CONFLICT(user_id, week_start) DO UPDATE SET
                            schedule_json = excluded.schedule_json""",
                     (user_id, week_start, new_json),
+                )
+            await db.commit()
+
+    async def save_schedule_snapshot(self, user_id: int, monday: date) -> None:
+        """Сохраняет текущие задачи недели как previous_json (точку отката) без изменения самих задач."""
+        day_idx = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                   "friday": 4, "saturday": 5, "sunday": 6}
+        idx_day = {v: k for k, v in day_idx.items()}
+        monday_iso = monday.isoformat()
+        sunday_iso = (monday + timedelta(days=6)).isoformat()
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT title, description, due_date, time, task_type FROM tasks
+                   WHERE user_id = ? AND from_schedule = 1 AND completed = 0
+                     AND due_date BETWEEN ? AND ?""",
+                (user_id, monday_iso, sunday_iso),
+            )
+            snap: dict = {k: [] for k in day_idx}
+            for t in [dict(r) for r in await cur.fetchall()]:
+                try:
+                    offset = (date.fromisoformat(t["due_date"]) - monday).days
+                    if 0 <= offset <= 6:
+                        snap[idx_day[offset]].append({
+                            "task": t["title"],
+                            "time": t["time"],
+                            "description": t["description"] or "",
+                            "task_type": t.get("task_type", "task"),
+                        })
+                except ValueError:
+                    pass
+            snap_json = json.dumps(snap, ensure_ascii=False)
+            row = await (await db.execute(
+                "SELECT id FROM schedules WHERE user_id = ? AND week_start = ?",
+                (user_id, monday_iso),
+            )).fetchone()
+            if row:
+                await db.execute(
+                    "UPDATE schedules SET previous_json = ? WHERE user_id = ? AND week_start = ?",
+                    (snap_json, user_id, monday_iso),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO schedules (user_id, week_start, schedule_json, previous_json)
+                       VALUES (?, ?, '{}', ?)""",
+                    (user_id, monday_iso, snap_json),
                 )
             await db.commit()
 

@@ -15,7 +15,6 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     loc = update.message.location
 
-    # Сбрасываем флаг ожидания города, если он был (пользователь выбрал геолокацию)
     ctx.user_data.pop("awaiting_city", None)
 
     await db.set_location(user.id, city=None, lat=loc.latitude, lon=loc.longitude)

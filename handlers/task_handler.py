@@ -19,33 +19,29 @@ _PRIORITY_RU = {
     "низкий": "low", "низкая": "low",
 }
 
-
 def _streak_emoji(n: int) -> str:
     for threshold in sorted(STREAK_EMOJIS.keys(), reverse=True):
         if n >= threshold:
             return STREAK_EMOJIS[threshold]
     return "🌱"
 
-
 PAGE_SIZE = 5
 
-
-def _task_keyboard(task_id: int, has_time: bool = False) -> InlineKeyboardMarkup:
-    """Кнопки одиночной карточки: ✅ Выполнить | … Ещё."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Выполнить", callback_data=f"task:done:{task_id}"),
-        InlineKeyboardButton("… Ещё",       callback_data=f"task:menu:{task_id}"),
-    ]])
-
+def _task_keyboard(task_id: int, has_time: bool = False, no_complete: bool = False, completed_today: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки одиночной карточки: ✅ Выполнить (если разрешено и не выполнено сегодня) | … Ещё."""
+    row = []
+    if not no_complete and not completed_today:
+        row.append(InlineKeyboardButton("✅ Выполнить", callback_data=f"task:done:{task_id}"))
+    row.append(InlineKeyboardButton("… Ещё", callback_data=f"task:menu:{task_id}"))
+    return InlineKeyboardMarkup([row])
 
 _REMIND_LABELS = {
     10: "10 мин", 15: "15 мин", 30: "30 мин",
     60: "1 час",  90: "90 мин", 120: "2 часа",
 }
 
-
 def _task_submenu_keyboard(task: dict, page) -> InlineKeyboardMarkup:
-    """Подменю «…»: напоминание (если есть время) + удалить + назад."""
+    """Подменю «…»: напоминание (если есть время) + удалить + переключатель выполнения + назад."""
     task_id = task["id"]
     page_suffix = f":{page}" if page is not None else ""
     back_data = f"tasks:page:{page}" if page is not None else f"task:menu_back:{task_id}"
@@ -60,9 +56,12 @@ def _task_submenu_keyboard(task: dict, page) -> InlineKeyboardMarkup:
         rows.append([
             InlineKeyboardButton("🗑 Удалить", callback_data=f"task:delete:{task_id}{page_suffix}"),
         ])
+    if task.get("no_complete"):
+        rows.append([InlineKeyboardButton("✅ Разрешить выполнение", callback_data=f"task:toggle_no_complete:{task_id}{page_suffix}")])
+    else:
+        rows.append([InlineKeyboardButton("🚫 Запретить выполнение", callback_data=f"task:toggle_no_complete:{task_id}{page_suffix}")])
     rows.append([InlineKeyboardButton("◀ Назад", callback_data=back_data)])
     return InlineKeyboardMarkup(rows)
-
 
 def _remind_picker_keyboard(task: dict, page) -> InlineKeyboardMarkup:
     """Пикер напоминания: 6 пресетов, ❌ только если напоминание уже стоит."""
@@ -88,12 +87,11 @@ def _remind_picker_keyboard(task: dict, page) -> InlineKeyboardMarkup:
     rows.append(last)
     return InlineKeyboardMarkup(rows)
 
-
 def _format_task_card(task: dict, today: str) -> str:
     """HTML-разметка карточки одной задачи. ➕ — задача добавлена пользователем
     поверх плана (from_schedule=0); ▫️ — пришла из сгенерированного расписания."""
     due = task.get("due_date")
-    if due and due < today:
+    if due and due < today and not task.get("no_complete"):
         icon = "⚠️"
     elif due and due == today:
         icon = "📌"
@@ -102,8 +100,12 @@ def _format_task_card(task: dict, today: str) -> str:
     else:
         icon = "▫️"
 
+    done_today = task.get("recurring") and task.get("completed_today")
+    if done_today:
+        icon = "✅"
     p = PRIORITY_ICON.get(task.get("priority") or "", "")
-    line = f"{p} {icon} <b>{task['title']}</b>" if p else f"{icon} <b>{task['title']}</b>"
+    title_text = f"<s>{task['title']}</s>" if done_today else task['title']
+    line = f"{p} {icon} <b>{title_text}</b>" if p else f"{icon} <b>{title_text}</b>"
     if due:
         when = f"до {due}"
         if task.get("time"):
@@ -114,7 +116,6 @@ def _format_task_card(task: dict, today: str) -> str:
     if task.get("description"):
         line += f"\n   {task['description']}"
     return line
-
 
 def _format_tasks_page(tasks: list[dict], page: int, today: str) -> str:
     """HTML страницы — заголовок и до PAGE_SIZE задач.
@@ -138,14 +139,18 @@ def _format_tasks_page(tasks: list[dict], page: int, today: str) -> str:
                 line += f"  <i>· до {due}</i>"
         else:
             task_num += 1
-            if due and due < today:
+            done_today = t.get("recurring") and t.get("completed_today")
+            if done_today:
+                icon = "✅ "
+            elif due and due < today and not t.get("no_complete"):
                 icon = "⚠️ "
             elif due and due == today:
                 icon = "📌 "
             else:
                 icon = ""
             p = PRIORITY_ICON.get(t.get("priority") or "", "")
-            line = f"<b>{task_num}. {icon}{p + ' ' if p else ''}{t['title']}</b>"
+            title_text = f"<s>{t['title']}</s>" if done_today else t['title']
+            line = f"<b>{task_num}. {icon}{p + ' ' if p else ''}{title_text}</b>"
             line += time_part
             if due:
                 line += f"  <i>· до {due}</i>"
@@ -153,7 +158,6 @@ def _format_tasks_page(tasks: list[dict], page: int, today: str) -> str:
                 line += f"  🔄 {t['recurring']}"
         lines.append(line)
     return "\n".join(lines)
-
 
 def _tasks_page_keyboard(tasks: list[dict], page: int) -> InlineKeyboardMarkup:
     """✅-кнопки по 3 в ряд только для task-типа + единое «… Настроить» + навигация."""
@@ -168,6 +172,8 @@ def _tasks_page_keyboard(tasks: list[dict], page: int) -> InlineKeyboardMarkup:
         if t.get("task_type") == "reminder":
             continue
         task_num += 1
+        if t.get("recurring") and t.get("completed_today"):
+            continue  # уже выполнено сегодня — кнопка не нужна
         done_row.append(InlineKeyboardButton(
             f"✅ {task_num}", callback_data=f"task:done:{t['id']}:{page}"
         ))
@@ -192,7 +198,6 @@ def _tasks_page_keyboard(tasks: list[dict], page: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
-
 def _tasks_settings_menu_keyboard(page_tasks: list[dict], page: int) -> InlineKeyboardMarkup:
     """Список задач страницы для выбора — открывает подменю конкретной задачи."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -209,7 +214,6 @@ def _tasks_settings_menu_keyboard(page_tasks: list[dict], page: int) -> InlineKe
     rows.append([InlineKeyboardButton("◀ Назад", callback_data=f"tasks:page:{page}")])
     return InlineKeyboardMarkup(rows)
 
-
 async def _send_or_edit_tasks_page(
     db: Database,
     db_user_id: int,
@@ -218,11 +222,7 @@ async def _send_or_edit_tasks_page(
     target_message=None,
     update=None,
 ) -> None:
-    """
-    Универсальная отрисовка страницы задач.
-    target_message  — query.message (для edit_text) при ответе на callback
-    update          — update (для reply_html) при первом вызове из /tasks
-    """
+
     tasks = await db.get_tasks(db_user_id)
     today = date.today().isoformat()
 
@@ -242,10 +242,14 @@ async def _send_or_edit_tasks_page(
     keyboard = _tasks_page_keyboard(tasks, page)
 
     if target_message is not None:
-        await target_message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        from telegram.error import BadRequest as _BadRequest
+        try:
+            await target_message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except _BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise
     else:
         await update.message.reply_html(text, reply_markup=keyboard)
-
 
 async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
@@ -265,7 +269,6 @@ async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Parse: title [| due_date_or_recurring [| priority]]
     segments = args_text.split("|", 2)
     title = segments[0].strip()
     due_date = None
@@ -324,14 +327,12 @@ async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=_task_keyboard(task_id, has_time=bool(time_val)),
     )
 
-
 async def tasks_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать активные задачи постранично (по 5 на странице)."""
     db: Database = ctx.bot_data["db"]
     user = update.effective_user
     db_user = await db.get_or_create_user(user.id, user.username, user.full_name)
     await _send_or_edit_tasks_page(db, db_user["id"], page=0, update=update)
-
 
 async def done_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
@@ -355,7 +356,6 @@ async def done_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_html(f"✅ Выполнено: <b>{task['title']}</b>")
 
-
 async def overdue_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
     user = update.effective_user
@@ -372,20 +372,7 @@ async def overdue_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     lines.append("\n<i>Лучше сделать сейчас, чем откладывать дальше 💪</i>")
     await update.message.reply_html("\n".join(lines))
 
-
-# ── Inline-кнопки на задачах ─────────────────────────────────────────────────
-
 async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Обработчик inline-кнопок задач. Понимает три формата callback_data:
-
-      • task:done:<id>            — одиночная карточка после /task
-      • task:delete:<id>          — то же
-      • task:done:<id>:<page>     — внутри постраничного /tasks
-      • task:delete:<id>:<page>   — то же
-      • tasks:page:<page>         — перелистывание страницы
-      • tasks:noop                — клик по «1/3» (ничего не делать)
-    """
     query = update.callback_query
     await query.answer()
 
@@ -398,7 +385,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     if not parts:
         return
 
-    # ── Перелистывание ─────────────────────────────────────────────────────
     if parts[0] == "tasks":
         if len(parts) >= 2 and parts[1] == "noop":
             return
@@ -412,7 +398,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             )
         return
 
-    # ── Единое меню настройки задач страницы ──────────────────────────────
     if parts[0] == "task" and len(parts) >= 3 and parts[1] == "settings_menu":
         try:
             page = int(parts[2])
@@ -430,7 +415,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # ── Выбор конкретной задачи из меню настройки ─────────────────────────
     if parts[0] == "task" and len(parts) >= 4 and parts[1] == "pick":
         try:
             task_id = int(parts[2])
@@ -453,7 +437,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # ── Действия с задачей ─────────────────────────────────────────────────
     if parts[0] != "task" or len(parts) < 3:
         return
     action = parts[1]
@@ -469,6 +452,24 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             page = int(parts[3])
         except ValueError:
             page = None
+
+    if action == "toggle_no_complete":
+        task = await db.toggle_task_no_complete(task_id, db_user["id"])
+        if not task:
+            await query.answer("Задача не найдена.", show_alert=True)
+            return
+        label = "🚫 Выполнение запрещено" if task.get("no_complete") else "✅ Выполнение разрешено"
+        await query.answer(label, show_alert=False)
+        today = date.today().isoformat()
+        card = _format_task_card(task, today)
+        if page is not None:
+            await _send_or_edit_tasks_page(db, db_user["id"], page, target_message=query.message)
+        else:
+            await query.edit_message_text(
+                card, parse_mode="HTML",
+                reply_markup=_task_submenu_keyboard(task, page),
+            )
+        return
 
     if action == "done":
         task = await db.complete_task(task_id, db_user["id"])
@@ -486,7 +487,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             await _send_or_edit_tasks_page(
                 db, db_user["id"], page, target_message=query.message
             )
-            await query.answer(text=f"✅ {task['title']}", show_alert=False)
         else:
             await query.edit_message_text(
                 f"✅ <s>{task['title']}</s>",
@@ -534,7 +534,7 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         card = _format_task_card(task, today)
         await query.edit_message_text(
             card, parse_mode="HTML",
-            reply_markup=_task_keyboard(task_id, has_time=bool(task.get("time"))),
+            reply_markup=_task_keyboard(task_id, has_time=bool(task.get("time")), no_complete=bool(task.get("no_complete")), completed_today=bool(task.get("recurring") and task.get("completed_today"))),
         )
 
     elif action == "remind_menu":
@@ -559,7 +559,6 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         )
 
     elif action == "remind":
-        # parts: task:remind:<task_id>:<minutes>[:<page>]
         if len(parts) < 4:
             return
         try:
@@ -593,7 +592,7 @@ async def handle_task_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
                 card = _format_task_card(task_data, today)
                 await query.edit_message_text(
                     card, parse_mode="HTML",
-                    reply_markup=_task_keyboard(task_id, has_time=True),
+                    reply_markup=_task_keyboard(task_id, has_time=True, no_complete=bool(task_data.get("no_complete")), completed_today=bool(task_data.get("recurring") and task_data.get("completed_today"))),
                 )
             else:
                 await query.edit_message_text("✓ Напоминание обновлено.")

@@ -14,8 +14,8 @@ DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📋 Задачи",   callback_data="menu:tasks"),
             InlineKeyboardButton("📅 Мой план", callback_data="menu:plan"),
+            InlineKeyboardButton("📋 Задачи", callback_data="menu:tasks"),
         ],
         [
             InlineKeyboardButton("📝 Заметки",  callback_data="menu:notes"),

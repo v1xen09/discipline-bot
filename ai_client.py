@@ -35,8 +35,6 @@ from config import Config
 
 log = logging.getLogger(__name__)
 
-# Базовая «механика» (правила формата) — в SYSTEM_BASE; тон/манера — в PERSONALITIES,
-# выбирается через /settings.
 
 SYSTEM_BASE = """/no_think
 Ты — TManager, ИИ-помощник по продуктивности.
@@ -83,7 +81,7 @@ PERSONALITY_LABELS: dict[str, str] = {
 
 
 def build_system_prompt(personality: str = "soft") -> str:
-    """Собрать системный промпт под конкретный характер."""
+    """Системный промпт под конкретный характер."""
     persona = PERSONALITIES.get(personality, PERSONALITIES["soft"])
     return f"{SYSTEM_BASE}\n{persona}"
 
@@ -93,7 +91,6 @@ SYSTEM_PROMPT = build_system_prompt("soft")
 
 
 def _extract_balanced_json(text: str) -> Optional[str]:
-    """Первый сбалансированный {…}-блок; надёжнее чем \\{.*\\}, который захватывает мусор до последнего }."""
     depth = 0
     start = -1
     in_string = False
@@ -171,7 +168,6 @@ def _try_parse_json(raw: str) -> Optional[dict]:
     except json.JSONDecodeError as e:
         log.warning("JSON parse failed at pos %s: %s | snippet: %r",
                     e.pos, e.msg, cleaned[max(0, e.pos - 40):e.pos + 40])
-        # Модель могла упереться в max_tokens — закрываем скобки и пробуем снова.
         repaired = _close_truncated_json(cleaned)
         repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
         try:
@@ -222,7 +218,6 @@ class AIClient:
         full_messages.extend(messages)
 
         # Qwen3: /no_think работает только в конце последнего user-сообщения.
-        # Исходный список не мутируем — он принадлежит вызывающему коду.
         if full_messages and full_messages[-1].get("role") == "user":
             last = dict(full_messages[-1])
             last["content"] = f"{last['content']}\n\n/no_think"
@@ -238,7 +233,6 @@ class AIClient:
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
         except Exception as e:
-            # Тело ответа LM Studio содержит причину (напр. «Model not loaded»), а не только 503.
             body = getattr(getattr(e, "response", None), "text", None)
             if body:
                 log.error("LM Studio call failed: %s | body: %s", e, body[:500])
@@ -254,14 +248,12 @@ class AIClient:
 
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
 
-        # Осиротевший <think> (модель упёрлась в max_tokens): берём текст до тега.
-        # Если до тега ничего нет — fallback на незакрытое размышление.
         if "<think>" in content:
             before, _, after = content.partition("<think>")
             if before.strip():
                 content = before
             else:
-                content = after  # незакрытое thinking как фолбэк
+                content = after
 
         content = content.strip()
 

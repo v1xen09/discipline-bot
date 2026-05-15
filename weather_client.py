@@ -1,13 +1,3 @@
-"""
-Клиент прогноза погоды.
-
-Погода: Яндекс.Погода API v2 (требует ключ YANDEX_WEATHER_KEY).
-Геокодинг: Open-Meteo Geocoding API (бесплатный, без ключа).
-
-Если ключ не задан — get_weather() возвращает None,
-бот работает без блока погоды.
-"""
-
 import logging
 from typing import Optional
 
@@ -68,10 +58,6 @@ class WeatherClient:
             return None
 
     async def get_weather(self, lat: float, lon: float) -> Optional[dict]:
-        """
-        Запросить текущую погоду у Яндекса.
-        Возвращает {"temp", "feels_like", "condition", "wind_speed"} или None.
-        """
         if not self._api_key:
             return None
         try:

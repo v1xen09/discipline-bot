@@ -22,12 +22,10 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     processing_msg = await update.message.reply_text("🎤 Слушаю…")
 
     try:
-        # Download voice file
         voice = update.message.voice
         tg_file = await ctx.bot.get_file(voice.file_id)
         file_bytes = await tg_file.download_as_bytearray()
 
-        # Transcribe
         transcript = await vh.transcribe(bytes(file_bytes))
         log.info("Transcribed for %d: %s", user.id, transcript)
 
@@ -35,10 +33,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await processing_msg.edit_text("Не смог разобрать голосовое. Попробуй ещё раз или напиши текстом.")
             return
 
-        # Show transcript
         await processing_msg.edit_text(f"🗣 <i>«{transcript}»</i>", parse_mode="HTML")
 
-        # AI intent detection
         context = await db.get_user_summary_context(user.id)
         result = ai.process_user_intent(transcript, context)
 

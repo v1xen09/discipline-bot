@@ -16,7 +16,6 @@ _REMINDER_PRESETS = [
 _TIME_PRESETS_MORNING = ["06:00", "07:00", "08:00", "09:00", "10:00", "11:00"]
 _TIME_PRESETS_EVENING = ["18:00", "19:00", "20:00", "21:00", "22:00", "23:00"]
 
-
 def _settings_keyboard(current: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     persona_row: list[InlineKeyboardButton] = []
@@ -37,7 +36,6 @@ def _settings_keyboard(current: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("← Меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
-
 async def _render_settings(db: Database, telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     current = await db.get_personality(telegram_id)
     label = PERSONALITY_LABELS.get(current, "🫂 Мягкий")
@@ -50,13 +48,11 @@ async def _render_settings(db: Database, telegram_id: int) -> tuple[str, InlineK
     )
     return text, _settings_keyboard(current)
 
-
 def _fix_time(t: str | None) -> str | None:
     """Нормализует старые значения вида '07' → '07:00'."""
     if t and ":" not in t:
         return t.zfill(2) + ":00"
     return t
-
 
 def _notif_keyboard(settings: dict) -> InlineKeyboardMarkup:
     morning = _fix_time(settings["morning"]) or "выкл"
@@ -72,7 +68,6 @@ def _notif_keyboard(settings: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("← Назад", callback_data="settings:open")],
     ])
 
-
 def _reminders_keyboard(current: str | None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for label, value in _REMINDER_PRESETS:
@@ -83,7 +78,6 @@ def _reminders_keyboard(current: str | None) -> InlineKeyboardMarkup:
         )])
     rows.append([InlineKeyboardButton("← Назад", callback_data="settings:notif_open")])
     return InlineKeyboardMarkup(rows)
-
 
 def _time_picker_keyboard(which: str, presets: list[str], current: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -100,12 +94,10 @@ def _time_picker_keyboard(which: str, presets: list[str], current: str | None = 
     rows.append([InlineKeyboardButton("← Назад", callback_data="settings:notif_open")])
     return InlineKeyboardMarkup(rows)
 
-
 async def settings_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = ctx.bot_data["db"]
     text, keyboard = await _render_settings(db, update.effective_user.id)
     await update.message.reply_html(text, reply_markup=keyboard)
-
 
 async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -152,8 +144,6 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             reply_markup=keyboard,
         )
         return
-
-    # ── Уведомления ──────────────────────────────────────────────────────────
 
     if action == "notif_open":
         settings = await db.get_notification_settings(user.id)
@@ -250,8 +240,6 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # ── Город / погода ───────────────────────────────────────────────────────
-
     if action == "set_city":
         db2: Database = ctx.bot_data["db"]
         loc = await db2.get_location(user.id)
@@ -268,8 +256,6 @@ async def handle_settings_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         )
         ctx.user_data["awaiting_city"] = True
         return
-
-    # ── Wipe ─────────────────────────────────────────────────────────────────
 
     if action == "wipe" and len(parts) == 2:
         keyboard = InlineKeyboardMarkup([

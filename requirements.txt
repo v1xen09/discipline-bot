@@ -1,13 +1,10 @@
 # Telegram
 python-telegram-bot==21.6
 
-# Локальная LLM через LM Studio (OpenAI-совместимый сервер).
-# Сам OpenAI SDK мы используем только как клиент HTTP — никакие
-# запросы на api.openai.com не уходят, base_url переопределяется.
+
 openai>=1.40.0
 
 # Локальное распознавание речи (Whisper).
-# CTranslate2 + PyAV ставятся как зависимости автоматически.
 faster-whisper>=1.0.0
 
 # Графики продуктивности (week / month / today)
@@ -22,7 +19,7 @@ APScheduler>=3.10.4
 # Env vars
 python-dotenv>=1.0.0
 
-# REST API (для десктопного клиента)
+# REST API
 flask[async]>=3.0.0
 flask-cors>=4.0.0
 

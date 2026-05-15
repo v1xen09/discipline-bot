@@ -104,8 +104,8 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             return
         schedule_row = await db.get_schedule_for_week(db_user["id"], week_start_iso)
         if schedule_row:
-            from handlers.schedule_handler import _build_schedule_history_context
-            context += "\n\n" + _build_schedule_history_context(
+            from handlers.schedule_handler import build_schedule_history_context
+            context += "\n\n" + build_schedule_history_context(
                 [{"week_start": week_start_iso, "schedule": schedule_row["schedule"]}]
             )
         processing_msg = await update.message.reply_text("⏳ Перерабатываю расписание…")
@@ -114,13 +114,12 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             await processing_msg.edit_text("Не смог разобрать ответ. Попробуй ещё раз.")
             return
         await db.save_schedule(db_user["id"], week_start_iso, schedule, keep_history=True)
-        from handlers.schedule_handler import _build_schedule_preview, DAY_NAMES
-        preview = _build_schedule_preview(schedule, monday_date)
+        from handlers.schedule_handler import build_schedule_preview
+        preview = build_schedule_preview(schedule, monday_date)
         week_label = f"{monday_date.strftime('%d.%m')}–{(monday_date + _timedelta(days=6)).strftime('%d.%m')}"
-        from telegram import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
-        keyboard = IKM([[
-            IKB("✅ Принять", callback_data=f"schedule_accept_proposal:{week_start_iso}"),
-            IKB("✏️ Изменить", callback_data=f"schedule_edit_proposal:{week_start_iso}"),
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Принять", callback_data=f"schedule_accept_proposal:{week_start_iso}"),
+            InlineKeyboardButton("✏️ Изменить", callback_data=f"schedule_edit_proposal:{week_start_iso}"),
         ]])
         await processing_msg.edit_text(
             f"📅 <b>Обновлённое расписание на {week_label}:</b>\n\n{preview}",
@@ -247,9 +246,9 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
                         pass
 
                 items: list[dict] = []
-                DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday",
+                day_keys = ["monday", "tuesday", "wednesday", "thursday",
                             "friday", "saturday", "sunday"]
-                for day_key in DAY_KEYS:
+                for day_key in day_keys:
                     for it in schedule.get(day_key, []) or []:
                         if not (it.get("task") or "").strip():
                             continue
@@ -332,6 +331,10 @@ async def handle_text_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             extra_lines.append("Приоритет изменён: " + ", ".join(f"«{t}»" for t in updated))
 
     elif intent == "modify_schedule" and result.get("schedule_changes"):
+        _snap_monday = _monday_from_changes(result["schedule_changes"])
+        if _snap_monday:
+            await db.save_schedule_snapshot(db_user["id"], _snap_monday)
+            ctx.user_data["last_schedule_monday"] = _snap_monday.isoformat()
         applied, errors = await _apply_schedule_changes(
             db, db_user["id"], result["schedule_changes"]
         )
@@ -426,7 +429,6 @@ async def _apply_by_ids_or_titles(
     titles: list[str],
     op,
 ) -> list[str]:
-    """Titles — основной путь (надёжнее ID от LLM); IDs — запасной, если titles пуст."""
     affected: list[str] = []
     seen_ids: set[int] = set()
 
@@ -458,6 +460,21 @@ async def _apply_by_ids_or_titles(
                 affected.append(applied["title"])
 
     return affected
+
+
+def _monday_from_changes(changes: list[dict]) -> "date | None":
+    """Возвращает понедельник недели по первой валидной дате из списка изменений."""
+    for ch in changes:
+        for key in ("date", "from_date", "to_date"):
+            raw = (ch.get(key) or "").strip()
+            if not raw:
+                continue
+            try:
+                d = date.fromisoformat(raw)
+                return d - timedelta(days=d.weekday())
+            except ValueError:
+                pass
+    return None
 
 
 _WEEKDAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]

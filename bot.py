@@ -1,7 +1,8 @@
 import asyncio
+import functools
 import logging
 
-from telegram import BotCommand
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -18,6 +19,7 @@ from handlers.ai_chat_handler import handle_text_message
 from handlers.schedule_handler import (
     AWAITING_SCHEDULE_WEEK,
     AWAITING_SCHEDULE_REQUEST,
+    cancel_schedule_command,
     handle_schedule_callback,
     myplan_command,
     receive_schedule_request,
@@ -112,7 +114,7 @@ async def _error_handler(update: object, ctx) -> None:
         from telegram import Update as _Update
         if isinstance(update, _Update) and update.effective_message is not None:
             if isinstance(err, (TimedOut, NetworkError)):
-                msg = "🌐 Соединение с Telegram сейчас флапает (скорее всего, VPN). Попробуй ещё раз через минуту."
+                msg = "🌐 Плохое соединение с Telegram. Попробуй ещё раз через минуту."
             else:
                 msg = f"⚠️ Что-то пошло не так: {type(err).__name__}. Попробуй ещё раз."
             await update.effective_message.reply_text(msg)
@@ -121,28 +123,27 @@ async def _error_handler(update: object, ctx) -> None:
 
 
 def _with_user_lock(handler):
-    """Предотвращает параллельный запуск handler'а одним пользователем."""
+    @functools.wraps(handler)
     async def wrapper(update: Update, ctx):
+        if update.effective_user is None:
+            return await handler(update, ctx)
         user_id = update.effective_user.id
         active: set = ctx.bot_data.setdefault("active_users", set())
         if user_id in active:
-            await update.effective_message.reply_text(
-                "⏳ Подожди — я ещё обрабатываю твоё предыдущее сообщение."
-            )
+            if update.effective_message:
+                await update.effective_message.reply_text(
+                    "⏳ Подожди — я ещё обрабатываю твоё предыдущее сообщение."
+                )
             return
         active.add(user_id)
         try:
-            await handler(update, ctx)
+            return await handler(update, ctx)
         finally:
             active.discard(user_id)
     return wrapper
 
 
 def main() -> None:
-    # Python 3.14: asyncio.get_event_loop() больше не создаёт loop сам, если
-    # в потоке его нет — теперь он бросает RuntimeError. python-telegram-bot
-    # 21.6 рассчитывает на старое поведение внутри run_polling(). Поэтому
-    # создаём loop вручную и кладём его в текущий поток.
     try:
         asyncio.get_event_loop()
     except RuntimeError:
@@ -151,17 +152,11 @@ def main() -> None:
     config = Config()
     config.validate()
 
-    # Сами объекты создаём синхронно — async-инициализацию (db.init)
-    # делает _post_init уже внутри loop'а PTB.
     db = Database(config.DATABASE_PATH)
     ai = AIClient(config)
     voice = WhisperVoiceHandler(config)
     weather = WeatherClient(config.YANDEX_WEATHER_KEY)
 
-    # HTTP-таймауты PTB по умолчанию 5 секунд. Для VPN/прокси этого мало —
-    # TLS-рукопожатие через медленный туннель может занять и 10–20 секунд.
-    # Поднимаем все четыре таймаута до 30 секунд, чтобы случайный лаг VPN
-    # не превращался в TimedOut и не валил handler'ы.
     app = (
         Application.builder()
         .token(config.TELEGRAM_TOKEN)
@@ -186,12 +181,14 @@ def main() -> None:
         states={
             AWAITING_SCHEDULE_WEEK: [
                 CallbackQueryHandler(schedule_week_selected, pattern=r"^schedule_week_select:"),
+                CallbackQueryHandler(cancel_schedule_command, pattern=r"^schedule_cancel$"),
             ],
             AWAITING_SCHEDULE_REQUEST: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, _with_user_lock(receive_schedule_request))
+                MessageHandler(filters.TEXT & ~filters.COMMAND, _with_user_lock(receive_schedule_request)),
+                CallbackQueryHandler(cancel_schedule_command, pattern=r"^schedule_cancel$"),
             ],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("cancel", cancel_schedule_command)],
         allow_reentry=True,
     )
 
